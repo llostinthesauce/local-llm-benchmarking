@@ -1,0 +1,111 @@
+{
+  "_comment": "Public model metadata and discovery rules. No local machine paths belong in this file.",
+  "_schema_version": 1,
+  "defaults": {
+    "ctx_cap": 131072,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20
+  },
+  "model_families": [
+    {
+      "id": "qwen3_35b_moe",
+      "name": "Qwen3.6-35B-A3B (MoE)",
+      "family": "qwen3",
+      "architecture": "moe",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "gguf_patterns": [
+        "Qwen3\\.6-35B-A3B(?!.*MTP).*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "Qwen3\\.[56]-35B-A3B.*(?:mlx|4bit)"
+      ]
+    },
+    {
+      "id": "qwen3_27b_dense",
+      "name": "Qwen3.6-27B (Dense)",
+      "family": "qwen3",
+      "architecture": "dense",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "gguf_patterns": [
+        "Qwen3\\.6-27B.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "Qwen3\\.[56]-27B.*(?:mlx|4bit)"
+      ]
+    },
+    {
+      "id": "gemma4_26b_moe",
+      "name": "Gemma 4 26B A4B (MoE)",
+      "family": "gemma4",
+      "architecture": "moe",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "top_k": 64,
+      "gguf_patterns": [
+        "gemma-4-26B-A4B.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "gemma-4-26b-a4b.*(?:mlx|4bit)"
+      ]
+    },
+    {
+      "id": "gemma4_31b_dense",
+      "name": "Gemma 4 31B (Dense)",
+      "family": "gemma4",
+      "architecture": "dense",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "top_k": 64,
+      "gguf_patterns": [
+        "gemma-4-31B.*\\.gguf$",
+        "gemma-4-31b.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "gemma-4-31b.*(?:mlx|4bit)"
+      ]
+    },
+    {
+      "id": "gemma4_e4b_dense",
+      "name": "Gemma 4 E4B (Dense)",
+      "family": "gemma4",
+      "architecture": "dense",
+      "ctx_cap": 131072,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "top_k": 64,
+      "gguf_patterns": [
+        "gemma-4-E4B.*\\.gguf$",
+        "gemma-4-e4b.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "gemma-4-E4B.*(?:MLX|mlx|4bit)",
+        "gemma-4-e4b.*(?:MLX|mlx|4bit)"
+      ]
+    },
+    {
+      "id": "granite_tiny",
+      "name": "Granite 4.0-h-tiny (MoE)",
+      "family": "granite",
+      "architecture": "moe",
+      "ctx_cap": 131072,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "gguf_patterns": [
+        "granite-4\\.0-h-tiny.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "granite-4\\.0-h-tiny.*(?:mlx|4bit)"
+      ]
+    }
+  ]
+}

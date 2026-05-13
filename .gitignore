@@ -1,0 +1,22 @@
+.venv/
+.DS_Store
+.claude/
+.remember/
+__pycache__/
+*.pyc
+archive/
+.playwright-mcp/
+tools/
+
+# Generated artifacts
+configs/opencode_llamacpp_provider.generated.json
+configs/models.local.json
+
+# macOS zip junk
+__MACOSX/
+
+# Results — local only, never commit
+results/
+
+# Environment secrets — use .env.example as template
+.env

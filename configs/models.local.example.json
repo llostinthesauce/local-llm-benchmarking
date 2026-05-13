@@ -1,0 +1,40 @@
+{
+  "_comment": "Example generated local registry. Create your real one with: python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json",
+  "_schema_version": 2,
+  "model_families": [
+    {
+      "id": "example_gguf",
+      "name": "Example GGUF model",
+      "family": "custom",
+      "architecture": "dense",
+      "ctx_cap": 131072,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "gguf": [
+        {
+          "quant": "Q4_K_M",
+          "path": "/path/to/model.gguf"
+        }
+      ],
+      "mlx": []
+    },
+    {
+      "id": "example_mlx",
+      "name": "Example MLX model",
+      "family": "custom",
+      "architecture": "dense",
+      "ctx_cap": 131072,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "gguf": [],
+      "mlx": [
+        {
+          "quant": "4bit",
+          "repo": "/path/to/mlx-model-directory"
+        }
+      ]
+    }
+  ]
+}

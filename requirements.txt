@@ -1,0 +1,8 @@
+psutil
+questionary
+requests
+rich
+
+# Optional: required only for MLX direct/server backends.
+mlx
+mlx-lm
