@@ -27,7 +27,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import model_registry
 
-API_BACKENDS = {"LLAMACPP_API", "MLX_API"}
+API_BACKENDS = {"LLAMACPP_API", "MLX_API", "MLX_VLM_API"}
 RAW_BACKENDS = {
     "LLAMACPP_RAW", "MLX_DIRECT", "GGUF",
 }

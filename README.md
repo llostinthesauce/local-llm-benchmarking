@@ -2,7 +2,7 @@
 
 Simple benchmark harness for comparing local inference backends on Apple Silicon.
 
-The active suite has four backends:
+The active suite has five backends:
 
 | Backend | Engine | CSV tag |
 | --- | --- | --- |
@@ -10,6 +10,7 @@ The active suite has four backends:
 | llama.cpp server | `llama-server` OpenAI-compatible API | `LLAMACPP_API` |
 | MLX direct | `mlx_lm.stream_generate` | `MLX_DIRECT` |
 | MLX server | `mlx_lm.server` OpenAI-compatible API | `MLX_API` |
+| MLX-VLM server | `mlx_vlm.server` OpenAI-compatible API | `MLX_VLM_API` |
 
 The TUI is the main entry point. Standalone scripts are kept for automation and debugging.
 
@@ -95,12 +96,12 @@ python3 scripts/model_registry.py list
 bash scripts/run_exhaustive_benchmarks.sh --dry-run
 ```
 
-The smoke test compiles the Python files, checks the four-backend wiring, validates CSV columns, and scans public files for local development paths.
+The smoke test compiles the Python files, checks the backend-to-runner wiring, validates CSV columns, and scans public files for local development paths.
 
 To verify the server launch commands without starting a model:
 
 ```bash
-bash scripts/serve_local.sh qwen35 --backend llamacpp --dry-run
+bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --dry-run
 bash scripts/serve_local.sh gemma26 --backend mlx --dry-run
 ```
 
@@ -111,7 +112,7 @@ Use aliases that exist in your generated `configs/models.local.json`.
 Aliases come from `configs/models.local.json`.
 
 ```bash
-bash scripts/serve_local.sh qwen35 --backend llamacpp --host 127.0.0.1
+bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --host 127.0.0.1
 bash scripts/serve_local.sh gemma26 --backend mlx --host 127.0.0.1
 ```
 

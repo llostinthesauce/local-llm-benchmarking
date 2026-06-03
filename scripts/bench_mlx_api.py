@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-bench_mlx_api.py — Benchmark via mlx_lm.server OpenAI-compatible API.
+bench_mlx_api.py — Benchmark via an MLX OpenAI-compatible server.
 
-Starts mlx_lm.server as a subprocess, benchmarks via streaming chat completions.
-Measures TTFT, gen TPS, peak memory. Supports MTP via --draft-model.
+Starts mlx_lm.server (text) or mlx_vlm.server (vision/omni) as a subprocess and
+benchmarks via streaming chat completions. Measures TTFT, gen TPS, peak memory.
+MTP via --draft-model is supported on mlx_lm only.
 
 Usage:
   python3 scripts/bench_mlx_api.py --model mlx-community/Qwen3.5-35B-A3B-4bit
   python3 scripts/bench_mlx_api.py --model mlx-community/gemma-4-26b-4bit --draft-model mlx-community/gemma-4-26b-mtp-drafter
+  python3 scripts/bench_mlx_api.py --model /path/to/vlm --server mlx_vlm
   python3 scripts/bench_mlx_api.py --model /path/to/local --passes micro --dry-run
 """
 from __future__ import annotations
@@ -16,6 +18,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -74,30 +77,41 @@ def _csv_append(row: dict, path: Path) -> None:
 
 
 def _start_server(model: str, port: int, draft_model: str | None = None,
-                  decode_concurrency: int = 1) -> subprocess.Popen | None:
-    cmd = [sys.executable, "-m", "mlx_lm.server", "--model", model,
-           "--host", "127.0.0.1", "--port", str(port)]
-    if draft_model:
-        cmd += ["--draft-model", draft_model]
-    if decode_concurrency > 1:
-        cmd += ["--decode-concurrency", str(decode_concurrency)]
+                  decode_concurrency: int = 1, server: str = "mlx_lm") -> subprocess.Popen | None:
+    if server == "mlx_vlm":
+        # mlx_vlm.server is OpenAI-compatible but invoked differently and does
+        # not support draft models or decode-concurrency. Prefer the console
+        # script, fall back to the module's `server` subcommand.
+        if shutil.which("mlx_vlm.server"):
+            cmd = ["mlx_vlm.server", "--model", model, "--host", "127.0.0.1", "--port", str(port)]
+        else:
+            cmd = [sys.executable, "-m", "mlx_vlm", "server", "--model", model,
+                   "--host", "127.0.0.1", "--port", str(port)]
+        label = "mlx_vlm.server"
+    else:
+        cmd = [sys.executable, "-m", "mlx_lm.server", "--model", model,
+               "--host", "127.0.0.1", "--port", str(port)]
+        if draft_model:
+            cmd += ["--draft-model", draft_model]
+        if decode_concurrency > 1:
+            cmd += ["--decode-concurrency", str(decode_concurrency)]
+        label = "mlx_lm.server"
 
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    api_base = f"http://127.0.0.1:{port}/v1"
     for i in range(60):
         time.sleep(1)
         if proc.poll() is not None:
             stderr_tail = proc.stderr.read().decode(errors="replace")[-500:] if proc.stderr else ""
-            print(f"  ERROR: mlx_lm.server exited early (rc={proc.returncode}): {stderr_tail}")
+            print(f"  ERROR: {label} exited early (rc={proc.returncode}): {stderr_tail}")
             return None
         try:
             r = requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=3)
             if r.status_code == 200:
-                print(f"  mlx_lm.server ready on port {port} (after {i+1}s)")
+                print(f"  {label} ready on port {port} (after {i+1}s)")
                 return proc
         except Exception:
             pass
-    print(f"  ERROR: mlx_lm.server failed to start on port {port}")
+    print(f"  ERROR: {label} failed to start on port {port}")
     proc.terminate()
     return None
 
@@ -107,19 +121,22 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                   temperature: float = 0.7, top_p: float = 0.8,
                   port: int = DEFAULT_PORT, decode_concurrency: int = 1,
                   quant: str = "?", cooldown: int = DEFAULT_COOLDOWN,
-                   mem_guard: float = 80.0, dry_run: bool = False) -> Path:
+                   mem_guard: float = 80.0, dry_run: bool = False,
+                  server: str = "mlx_lm") -> Path:
     model_repo = os.path.expanduser(model_repo)
     model_name = model_repo.split("/")[-1]
     full_model_id = model_repo  # mlx server expects full repo path
+    backend_label = "MLX_VLM_API" if server == "mlx_vlm" else "MLX_API"
+    file_prefix = "mlx_vlm_api" if server == "mlx_vlm" else "mlx_api"
     run_id = str(uuid.uuid4())[:8]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_csv = output_dir / f"mlx_api_{model_name}_{ts}.csv"
+    out_csv = output_dir / f"{file_prefix}_{model_name}_{ts}.csv"
     output_dir.mkdir(parents=True, exist_ok=True)
     api_base = f"http://127.0.0.1:{port}/v1"
 
     server_proc = None
     if not dry_run:
-        server_proc = _start_server(model_repo, port, draft_model, decode_concurrency)
+        server_proc = _start_server(model_repo, port, draft_model, decode_concurrency, server)
         if not server_proc:
             sys.exit(1)
 
@@ -130,7 +147,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
             mem_pct = psutil.virtual_memory().percent
             if mem_pct >= mem_guard:
                 _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
-                    "model_name": model_name, "backend": "MLX_API", "pass_name": p["id"],
+                    "model_name": model_name, "backend": backend_label, "pass_name": p["id"],
                     "ctx_cap": ctx_cap, "ctx_used": ctx_used, "prompt_tokens": 0, "gen_tokens": 0,
                     "prompt_tps": 0.0, "gen_tps": 0.0, "ttft_s": 0.0, "peak_mem_pct": round(mem_pct, 1),
                     "status": f"skipped_mem_{mem_pct:.0f}pct", "quant": quant, "concurrency": 1,
@@ -217,7 +234,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                 status = f"underfilled_context_prompt_{pt_out}_target_{target_prompt_tokens}"
 
             _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
-                "model_name": model_name, "backend": "MLX_API", "pass_name": p["id"],
+                "model_name": model_name, "backend": backend_label, "pass_name": p["id"],
                 "ctx_cap": ctx_cap, "ctx_used": ctx_used, "prompt_tokens": pt_out, "gen_tokens": gt_out,
                 "prompt_tps": 0.0, "gen_tps": round(tps, 2), "ttft_s": round(ttft, 3),
                 "peak_mem_pct": peak, "status": status, "quant": quant, "concurrency": 1,
@@ -252,6 +269,8 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.8)
     ap.add_argument("--quant", type=str, default="?", help="Quant label for CSV")
+    ap.add_argument("--server", choices=["mlx_lm", "mlx_vlm"], default="mlx_lm",
+                    help="Server backend: mlx_lm (text) or mlx_vlm (vision/omni)")
     ap.add_argument("--dry-run", action="store_true")
 
     args = ap.parse_args()
@@ -259,7 +278,7 @@ def main() -> None:
     run_benchmark(args.model, selected_passes, args.output_dir,
                   args.draft_model, args.ctx_cap, args.temperature, args.top_p,
                   args.port, args.decode_concurrency, args.quant, args.cooldown,
-                  args.mem_guard, args.dry_run)
+                  args.mem_guard, args.dry_run, args.server)
 
 
 if __name__ == "__main__":

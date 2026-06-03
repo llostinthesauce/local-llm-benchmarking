@@ -218,6 +218,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
             "llamacpp_api": "llama.cpp server",
             "mlx_direct": "MLX direct",
             "mlx_api": "MLX server",
+            "mlx_vlm_api": "MLX-VLM server",
         }
         return ", ".join(labels[b] for b in state["backends"]) if state["backends"] else "none"
 
@@ -251,6 +252,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                 questionary.Choice("llama.cpp server (llama-server :8080)", value="llamacpp_api", checked="llamacpp_api" in prev),
                 questionary.Choice("MLX direct (mlx_lm.stream_generate)", value="mlx_direct", checked="mlx_direct" in prev),
                 questionary.Choice("MLX server (mlx_lm.server :8085)", value="mlx_api", checked="mlx_api" in prev),
+                questionary.Choice("MLX-VLM server (mlx_vlm.server :8085)", value="mlx_vlm_api", checked="mlx_vlm_api" in prev),
             ]
             state["backends"] = _abort(questionary.checkbox("Backends:", choices=choices).ask()) or []
             console.print(f"  [green]Selected: {_fmt_backends()}[/green]")
@@ -275,7 +277,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                 choices = [questionary.Choice(m["label"], value=m, checked=True) for m in gguf_opts]
                 state["sel_api"] = _abort(questionary.checkbox("llama.cpp server models:", choices=choices).ask()) or []
 
-            if any(b in state["backends"] for b in ("mlx_direct", "mlx_api")) and mlx_opts:
+            if any(b in state["backends"] for b in ("mlx_direct", "mlx_api", "mlx_vlm_api")) and mlx_opts:
                 choices = [questionary.Choice(m["label"], value=m, checked=True) for m in mlx_opts]
                 state["sel_mlx"] = _abort(questionary.checkbox("MLX models:", choices=choices).ask()) or []
 
@@ -449,13 +451,37 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                     if i < len(state["sel_mlx"]) - 1:
                         _cooldown(state["cooldown_s"])
 
+            if "mlx_vlm_api" in state["backends"] and state["sel_mlx"]:
+                from scripts.bench_mlx_api import run_benchmark as run_mlx_api
+
+                out_dir = results_dir / "mlx_vlm_api"
+                console.print("\n[bold cyan]=== MLX-VLM server ===[/bold cyan]")
+                for i, model in enumerate(state["sel_mlx"]):
+                    repo = model["mlx_repo"]
+                    console.print(f"\n [bold][{i + 1}/{len(state['sel_mlx'])}] {repo}[/bold]")
+                    csv_path = run_mlx_api(
+                        repo,
+                        state["sel_passes"],
+                        out_dir,
+                        ctx_cap=model["ctx_cap"],
+                        temperature=model.get("temperature", 0.7),
+                        top_p=model.get("top_p", 0.8),
+                        quant=model.get("quant", "?"),
+                        cooldown=state["cooldown_s"],
+                        mem_guard=state["mem_guard"],
+                        server="mlx_vlm",
+                    )
+                    console.print(f" [green]CSV -> {csv_path}[/green]")
+                    if i < len(state["sel_mlx"]) - 1:
+                        _cooldown(state["cooldown_s"])
+
             console.print("\n[bold green]All done.[/bold green]")
             break
 
 
 def main() -> None:
     here = Path(__file__).parent
-    parser = argparse.ArgumentParser(description="Four-backend local LLM benchmark TUI")
+    parser = argparse.ArgumentParser(description="Five-backend local LLM benchmark TUI")
     parser.add_argument(
         "--config-v2",
         type=Path,

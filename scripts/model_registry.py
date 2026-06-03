@@ -131,6 +131,7 @@ def iter_models(config: Path) -> list[dict[str, Any]]:
                 "note": entry.get("_note", ""),
                 "mtp_supported": entry.get("mtp_supported", False),
                 "server_binary": _expand(entry.get("server_binary", "")),
+                "mmproj_path": _expand(entry.get("mmproj_path", "")),
                 "spec_type": entry.get("spec_type", ""),
                 "spec_draft_n_max": entry.get("spec_draft_n_max", ""),
             })
@@ -189,6 +190,7 @@ def _print_shell(model: dict[str, Any]) -> None:
         "top_k",
         "mtp_supported",
         "server_binary",
+        "mmproj_path",
         "spec_type",
         "spec_draft_n_max",
     ):

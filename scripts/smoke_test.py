@@ -21,7 +21,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 CONFIG_DIR = ROOT / "configs"
 
 EXIT = 0
-SKIP_DIRS = {"__pycache__", ".git", ".venv", "tools", "archive", ".remember", ".claude", "results"}
+SKIP_DIRS = {"__pycache__", ".git", ".venv", "tools", "archive", ".remember", ".claude", "results", ".antigravitycli"}
 
 
 def fail(msg: str) -> None:
@@ -121,6 +121,7 @@ def check_backend_runners() -> None:
         "LLAMACPP_API": SCRIPTS_DIR / "bench_llamacpp_api.py",
         "MLX_DIRECT": SCRIPTS_DIR / "bench_mlx_direct.py",
         "MLX_API": SCRIPTS_DIR / "bench_mlx_api.py",
+        "MLX_VLM_API": SCRIPTS_DIR / "bench_mlx_api.py",
     }
     for backend, runner in sorted(backends.items()):
         if runner.exists():
