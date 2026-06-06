@@ -107,22 +107,6 @@
         "gemma-4-E4B.*(?:MLX|mlx|4bit)",
         "gemma-4-e4b.*(?:MLX|mlx|4bit)"
       ]
-    },
-    {
-      "id": "granite_tiny",
-      "name": "Granite 4.0-h-tiny (MoE)",
-      "family": "granite",
-      "architecture": "moe",
-      "ctx_cap": 131072,
-      "temperature": 0.7,
-      "top_p": 0.8,
-      "top_k": 20,
-      "gguf_patterns": [
-        "granite-4\\.0-h-tiny.*\\.gguf$"
-      ],
-      "mlx_patterns": [
-        "granite-4\\.0-h-tiny.*(?:mlx|4bit)"
-      ]
     }
   ]
 }

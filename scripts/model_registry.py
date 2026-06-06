@@ -41,8 +41,6 @@ LEGACY_ALIASES = {
     "gemma-e4b": "gemma4_e4b_dense",
     "gemma4e4b": "gemma4_e4b_dense",
     "gemma4-e4b": "gemma4_e4b_dense",
-    "granite-htiny": "granite_tiny",
-    "granite-tiny": "granite_tiny",
     "qwen35-uncensored": "qwen3_35b_moe_uncensored",
     "qwen35uncensored": "qwen3_35b_moe_uncensored",
     "qwen35-nvfp4": "qwen3_35b_moe_nvfp4",

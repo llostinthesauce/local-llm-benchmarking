@@ -51,7 +51,7 @@ python3 scripts/model_registry.py list
 python3 scripts/check_model_availability.py
 ```
 
-The scanner recognizes known Qwen, Gemma, and Granite families from `configs/model_catalog.json`. Unmatched GGUF files and MLX directories are still added as custom models with conservative defaults.
+The scanner recognizes known Qwen and Gemma families from `configs/model_catalog.json`. Unmatched GGUF files and MLX directories are still added as custom models with conservative defaults.
 
 ## Run
 
