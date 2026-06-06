@@ -103,6 +103,8 @@ To verify the server launch commands without starting a model:
 ```bash
 bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --dry-run
 bash scripts/serve_local.sh gemma26 --backend mlx --dry-run
+bash scripts/serve_local.sh gemma31 --backend mlx --dry-run
+bash scripts/serve_local.sh gemma12 --backend mlx-vlm --dry-run
 ```
 
 Use aliases that exist in your generated `configs/models.local.json`.
@@ -114,9 +116,16 @@ Aliases come from `configs/models.local.json`.
 ```bash
 bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --host 127.0.0.1
 bash scripts/serve_local.sh gemma26 --backend mlx --host 127.0.0.1
+bash scripts/serve_local.sh gemma31 --backend mlx --host 127.0.0.1
+bash scripts/serve_local.sh gemma12 --backend mlx-vlm --host 127.0.0.1
 ```
 
 Both server launch paths bind to loopback by default.
+
+Gemma 4 vision/omni checkpoints carry a `vision_config` but are usually served as
+text. `gemma31` (`model_type: gemma4`) loads under `mlx_lm` via `--backend mlx`.
+`gemma12` is an omni `gemma4_unified` checkpoint that `mlx_lm` cannot load — serve it
+with `--backend mlx-vlm` (requires `mlx-vlm >= 0.6.1`).
 
 You can also pass a direct model path:
 

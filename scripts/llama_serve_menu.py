@@ -39,7 +39,11 @@ def _rows() -> list[dict]:
                 "backends": set(),
                 "quant": row.get("quant", "?"),
             }
-        families[family_id]["backends"].add(row["backend"])
+        # Only surface a backend if its model is actually on disk. A registry row
+        # whose file is missing must not be offered — selecting it would either
+        # error or (for MLX repo-ids) trigger a download.
+        if row.get("exists"):
+            families[family_id]["backends"].add(row["backend"])
     result = []
     for item in families.values():
         item["backends"] = sorted(item["backends"])
@@ -49,7 +53,20 @@ def _rows() -> list[dict]:
 
 def _display_label(row: dict) -> str:
     backends = ", ".join(b for b in row["backends"] if b in ("llamacpp", "mlx"))
-    return f"{row['family_id']} [{backends}]"
+    return f"{row['family_id']} [{backends or 'unavailable'}]"
+
+
+def _supported_backends(selector: str) -> list[str]:
+    """Backends whose model for `selector` resolves AND exists on disk."""
+    found = []
+    for backend in ("llamacpp", "mlx"):
+        try:
+            row = model_registry.resolve(selector, backend, model_registry.DEFAULT_CONFIG)
+        except SystemExit:
+            continue
+        if row.get("exists"):
+            found.append(backend)
+    return found
 
 
 def _choose(items: list[dict], title: str, label_fn) -> dict:
@@ -160,17 +177,31 @@ def main() -> None:
     if not selector:
         family = _choose(_rows(), "Local model server", _display_label)
         selector = family["family_id"]
+        supported = list(family["backends"])
+    else:
+        supported = _supported_backends(selector)
 
     if not backend:
         host_label = args.host or "127.0.0.1"
-        backend_choices = [{"backend": "llamacpp", "label": f"llama.cpp API on {host_label}:8080"}]
-        try:
-            model_registry.resolve(selector, "mlx", model_registry.DEFAULT_CONFIG)
-            backend_choices.append({"backend": "mlx", "label": f"MLX API on {host_label}:8085"})
-        except SystemExit:
-            pass
-        if args.selector:
-            backend = "llamacpp"
+        labels = {
+            "llamacpp": f"llama.cpp API on {host_label}:8080",
+            "mlx": f"MLX API on {host_label}:8085",
+        }
+        # Only offer backends this model actually has on disk — a one-backend
+        # model skips the prompt entirely instead of falsely showing both.
+        backend_choices = [
+            {"backend": b, "label": labels[b]} for b in ("llamacpp", "mlx") if b in supported
+        ]
+        if not backend_choices:
+            raise SystemExit(
+                f"No serving backend is available on disk for '{selector}'. "
+                f"Check 'python3 scripts/model_registry.py list'."
+            )
+        if len(backend_choices) == 1:
+            backend = backend_choices[0]["backend"]
+            print(f"Backend: {backend} (only on-disk option for {selector})")
+        elif args.selector:
+            backend = backend_choices[0]["backend"]
         else:
             selected_backend = _choose(backend_choices, "Serving backend", lambda item: item["label"])
             backend = selected_backend["backend"]

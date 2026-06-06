@@ -70,7 +70,24 @@
         "gemma-4-31b.*\\.gguf$"
       ],
       "mlx_patterns": [
-        "gemma-4-31b.*(?:mlx|4bit)"
+        "gemma-4-31b.*(?:MLX|mlx|4bit|8bit)"
+      ]
+    },
+    {
+      "id": "gemma4_12b_dense",
+      "name": "Gemma 4 12B (Dense)",
+      "family": "gemma4",
+      "architecture": "dense",
+      "ctx_cap": 131072,
+      "temperature": 0.7,
+      "top_p": 0.95,
+      "top_k": 64,
+      "gguf_patterns": [
+        "gemma-4-12B.*\\.gguf$",
+        "gemma-4-12b.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "gemma-4-12b.*(?:MLX|mlx|4bit|8bit)"
       ]
     },
     {

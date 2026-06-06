@@ -198,44 +198,37 @@ case "$BACKEND" in
         exec "${CMD[@]}"
         ;;
 
-    mlx)
+    mlx|mlx-vlm)
         MODEL_PATH=$(eval echo "$MODEL_ARG")
-        if [[ "$MODEL_PATH" == */* && ! -d "$MODEL_PATH" ]]; then
-            :
-        elif [[ ! -d "$MODEL_PATH" ]]; then
-            echo "ERROR: MLX model directory does not exist: $MODEL_PATH"
+        if [[ ! -d "$MODEL_PATH" ]]; then
+            echo "ERROR: MLX model directory not found on disk: $MODEL_PATH" >&2
+            echo "Refusing to launch: a non-local --model would make the MLX server download from Hugging Face." >&2
             exit 1
         fi
 
-        echo ""
-        if command -v mlx_lm.server >/dev/null 2>&1; then
-            CMD=(mlx_lm.server --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
-        else
-            CMD=("$PYTHON_BIN" -m mlx_lm server --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
-        fi
-        if [[ "$DRY_RUN" == "1" ]]; then
-            printf 'DRY RUN:'
-            printf ' %q' "${CMD[@]}"
-            printf '\n'
-            exit 0
-        fi
-        exec "${CMD[@]}"
-        ;;
-
-    mlx-vlm)
-        MODEL_PATH=$(eval echo "$MODEL_ARG")
-        if [[ "$MODEL_PATH" == */* && ! -d "$MODEL_PATH" ]]; then
-            :
-        elif [[ ! -d "$MODEL_PATH" ]]; then
-            echo "ERROR: MLX-VLM model directory does not exist: $MODEL_PATH"
-            exit 1
+        # Pick the runner. mlx_lm serves text MLX dirs; mlx_vlm serves vision/omni
+        # towers. mlx_lm CANNOT load the gemma4_unified omni arch, so route those to
+        # mlx_vlm even when the caller asked for plain --backend mlx. (Plain
+        # "has vision_config" is intentionally NOT enough — most omni models serve
+        # fine and faster as text under mlx_lm.)
+        MLX_SERVER="mlx_lm"
+        [[ "$BACKEND" == "mlx-vlm" ]] && MLX_SERVER="mlx_vlm"
+        if [[ "$MLX_SERVER" == "mlx_lm" && -f "$MODEL_PATH/config.json" ]] \
+            && grep -Eq '"model_type"[[:space:]]*:[[:space:]]*"gemma4_unified"' "$MODEL_PATH/config.json"; then
+            echo " Note: model_type gemma4_unified is unsupported by mlx_lm — routing to mlx_vlm.server."
+            MLX_SERVER="mlx_vlm"
         fi
 
+        # Serve strictly from disk. HF_HUB_OFFLINE stops the server from silently
+        # downloading a model when a client request names a repo-id that is not the
+        # loaded local path (mlx_lm/mlx_vlm reload per-request "model").
+        MLX_ENV=(env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1)
+
         echo ""
-        if command -v mlx_vlm.server >/dev/null 2>&1; then
-            CMD=(mlx_vlm.server --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
+        if command -v "${MLX_SERVER}.server" >/dev/null 2>&1; then
+            CMD=("${MLX_ENV[@]}" "${MLX_SERVER}.server" --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
         else
-            CMD=("$PYTHON_BIN" -m mlx_vlm server --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
+            CMD=("${MLX_ENV[@]}" "$PYTHON_BIN" -m "$MLX_SERVER" server --model "$MODEL_PATH" --host "$HOST" --port "$PORT")
         fi
         if [[ "$DRY_RUN" == "1" ]]; then
             printf 'DRY RUN:'
