@@ -155,6 +155,7 @@ def iter_models(config: Path) -> list[dict[str, Any]]:
                 "note": entry.get("_note", ""),
                 "mtp_supported": entry.get("mtp_supported", False),
                 "draft_model": entry.get("draft_model", ""),
+                "mlx_server": entry.get("mlx_server", ""),
             })
     return rows
 
@@ -192,6 +193,7 @@ def _print_shell(model: dict[str, Any]) -> None:
         "temperature",
         "top_p",
         "top_k",
+        "mlx_server",
         "mtp_supported",
         "server_binary",
         "mmproj_path",

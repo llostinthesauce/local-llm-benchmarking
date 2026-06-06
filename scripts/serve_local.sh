@@ -213,6 +213,14 @@ case "$BACKEND" in
         # fine and faster as text under mlx_lm.)
         MLX_SERVER="mlx_lm"
         [[ "$BACKEND" == "mlx-vlm" ]] && MLX_SERVER="mlx_vlm"
+        # Registry can pin a model to a specific MLX server (models.local.json
+        # "mlx_server") for archs/weights mlx_lm cannot load: gemma4_unified (12B)
+        # and the gemma4 E4B elastic checkpoint. This is the reliable signal.
+        if [[ "${MODEL_MLX_SERVER:-}" == "mlx_vlm" && "$MLX_SERVER" == "mlx_lm" ]]; then
+            echo " Note: registry pins this model to mlx_vlm.server (mlx_lm cannot load it)."
+            MLX_SERVER="mlx_vlm"
+        fi
+        # Fallback heuristic if a gemma4_unified model was not pinned in the registry.
         if [[ "$MLX_SERVER" == "mlx_lm" && -f "$MODEL_PATH/config.json" ]] \
             && grep -Eq '"model_type"[[:space:]]*:[[:space:]]*"gemma4_unified"' "$MODEL_PATH/config.json"; then
             echo " Note: model_type gemma4_unified is unsupported by mlx_lm — routing to mlx_vlm.server."

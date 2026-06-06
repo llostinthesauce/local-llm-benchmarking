@@ -122,10 +122,13 @@ bash scripts/serve_local.sh gemma12 --backend mlx-vlm --host 127.0.0.1
 
 Both server launch paths bind to loopback by default.
 
-Gemma 4 vision/omni checkpoints carry a `vision_config` but are usually served as
-text. `gemma31` (`model_type: gemma4`) loads under `mlx_lm` via `--backend mlx`.
-`gemma12` is an omni `gemma4_unified` checkpoint that `mlx_lm` cannot load — serve it
-with `--backend mlx-vlm` (requires `mlx-vlm >= 0.6.1`).
+Every local MLX checkpoint here carries a `vision_config` — they are all
+vision-capable. By default `--backend mlx` serves them as **text** via `mlx_lm`
+(faster); `--backend mlx-vlm` loads the **vision tower** via `mlx_vlm`. Two of them
+cannot be loaded by the text engine at all and are auto-routed to `mlx_vlm` even
+under `--backend mlx`: `gemma12` (`model_type: gemma4_unified`) and `gemmae4b` (the
+E4B elastic weights). That routing comes from the `mlx_server` field in the registry,
+and needs `mlx-vlm >= 0.6.1`.
 
 You can also pass a direct model path:
 
@@ -133,6 +136,29 @@ You can also pass a direct model path:
 bash scripts/serve_local.sh /path/to/model.gguf --backend llamacpp
 bash scripts/serve_local.sh /path/to/mlx-model-dir --backend mlx
 ```
+
+## Operating notes
+
+Conventions this repo assumes on the local machine:
+
+1. **All models live under `~/.lmstudio/models` (as `<org>/<repo>` subfolders).** The Hugging Face
+   hub cache (`~/.cache/huggingface/hub`) is intentionally left empty — an empty
+   cache is normal, not a broken setup.
+2. **Serving never downloads.** MLX servers launch with `HF_HUB_OFFLINE=1`, and
+   `serve_local.sh` refuses a `--model` that is not a local directory. To add a
+   model, place it under `~/.lmstudio/models` then regenerate the registry:
+   `python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json`.
+3. **All local MLX models are vision-capable.** `--backend mlx` = text (fast),
+   `--backend mlx-vlm` = vision tower. `gemma12` and `gemmae4b` only load under
+   `mlx_vlm`; they carry `"mlx_server": "mlx_vlm"` in the registry and are
+   auto-routed there even under `--backend mlx`. In `bench_tui.py`, benchmark those
+   two with the **MLX-VLM server** backend (MLX direct / MLX server will fail).
+4. **MLX servers switch models per request.** `mlx_lm.server` maps the special id
+   `default_model` to whatever was launched; `mlx_vlm.server` has no such mapping
+   and needs the exact loaded path. Any other model id triggers a load — which the
+   offline guard turns into a clean error instead of a download. For OpenAI-style
+   clients (e.g. opencode), address the `mlx_lm` fleet as `default_model`, and any
+   `mlx_vlm`-only model by its exact local path.
 
 ## Passes
 
