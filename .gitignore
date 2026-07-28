@@ -44,3 +44,8 @@ test_prompt.py
 
 # Corbin GPT — large, private, never public (personal writing + AI exports)
 corbin-gpt/
+
+# Personal leak-detection patterns: hostnames and usernames the hygiene check
+# scans for. Inherently private — committing them would publish the very names
+# the check exists to keep out. Template: .leakpatterns.example
+.leakpatterns

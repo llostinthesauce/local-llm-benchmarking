@@ -413,14 +413,26 @@ LEAK_SUBSTRINGS = [
     ".lmstudio/models/",
 ]
 
-# Machine and account identifiers. These must match on word boundaries — a bare
-# substring search flags "formatting" for containing the hostname "matti", which
-# is exactly the kind of false positive that trains people to ignore the check.
-LEAK_WORDS = [
-    "notOnGit",
-    "flados",
-    "matti",
-]
+# Machine and account identifiers, loaded from a git-ignored file.
+#
+# These are inherently personal — hostnames, usernames, internal project
+# codenames — so committing them would mean the public repo advertises exactly
+# the private names it exists to keep out. Put yours in `.leakpatterns`, one per
+# line (see .leakpatterns.example). Matching is on word boundaries: a bare
+# substring search flags "formatting" for containing a hostname like "matti",
+# and false positives are what train people to ignore the check.
+LEAK_WORDS_FILE = ROOT / ".leakpatterns"
+
+
+def _load_leak_words() -> list[str]:
+    try:
+        lines = LEAK_WORDS_FILE.read_text().splitlines()
+    except OSError:
+        return []
+    return [w.strip() for w in lines if w.strip() and not w.startswith("#")]
+
+
+LEAK_WORDS = _load_leak_words()
 
 # Docs legitimately show `~/.lmstudio/models` as the conventional model root.
 # `~`-prefixed references carry no username, so they are not a leak.

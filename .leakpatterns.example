@@ -1,0 +1,10 @@
+# Personal identifiers that must never reach a public file.
+# One per line; matched case-insensitively on word boundaries.
+# Copy to `.leakpatterns` (git-ignored) and add your own.
+#
+# Good candidates: machine hostnames, your username, internal codenames,
+# employer or client names, anything that identifies you or your network.
+#
+# my-laptop-hostname
+# my-username
+# internal-project-codename

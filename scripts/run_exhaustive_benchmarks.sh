@@ -14,16 +14,25 @@ ALLOW_DIRTY=0
 ALLOW_ACTIVE=0
 RUN_DIR=""
 PASSES=(micro normal high max)
+EVALS=()
+EVAL_FETCH=0
 
 usage() {
     cat <<'EOF'
 Usage:
   scripts/run_exhaustive_benchmarks.sh --dry-run [--passes micro,normal]
   scripts/run_exhaustive_benchmarks.sh --execute [--allow-dirty] [--passes micro,normal]
+  scripts/run_exhaustive_benchmarks.sh --execute --evals tier1
 
 Real benchmark runs require --execute. A dirty git worktree is refused unless
 --allow-dirty is passed. --passes accepts a comma-separated subset of:
 micro, normal, high, max. Default: all four.
+
+--evals runs the quality suite against each served model while its server is
+already up, so accuracy is measured on exactly the configuration that was just
+timed. Accepts a comma-separated list of eval names, or tier1 / tier2 / all.
+Default: none. Tier-2 evals additionally need --eval-fetch to permit their
+one-time dataset download.
 EOF
 }
 
@@ -37,6 +46,11 @@ while [[ $# -gt 0 ]]; do
             IFS=',' read -ra PASSES <<< "${2:-}"
             shift 2
             ;;
+        --evals)
+            IFS=',' read -ra EVALS <<< "${2:-}"
+            shift 2
+            ;;
+        --eval-fetch)    EVAL_FETCH=1; shift ;;
         --run-dir)
             RUN_DIR="${2:-}"
             [[ -z "$RUN_DIR" ]] && { echo "ERROR: --run-dir requires a value"; exit 2; }
@@ -171,6 +185,31 @@ log() {
     printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"
 }
 
+run_quality() {
+    # run_quality <model_id> <api_base> <backend_label> <quant> <ctx_cap> <step_name>
+    # Called while the server for this model is still up, so the evals hit the
+    # exact configuration that was just timed.
+    [[ ${#EVALS[@]} -gt 0 ]] || return 0
+    local model_id="$1" api_base="$2" backend="$3" quant="$4" ctx_cap="$5" step="$6"
+    local fetch_args=()
+    [[ "$EVAL_FETCH" == "1" ]] && fetch_args+=(--fetch)
+
+    if [[ "$DRY_RUN" == "1" ]]; then
+        log "DRY RUN quality: $model_id evals=${EVALS[*]} backend=$backend"
+        return 0
+    fi
+    run_step "$step" \
+        "$PYTHON" scripts/bench_quality.py \
+            --model "$model_id" \
+            --url "$api_base" \
+            --evals "${EVALS[@]}" \
+            --backend "$backend" \
+            --quant "$quant" \
+            --ctx-cap "$ctx_cap" \
+            --output-dir "$RUN_DIR/quality" \
+            ${fetch_args:+"${fetch_args[@]}"}
+}
+
 run_step() {
     local label="$1"
     shift
@@ -297,6 +336,8 @@ while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported 
                     --cooldown "$COOLDOWN" \
                     --mem-guard "$MEM_GUARD" \
                     ${BENCH_MTP_ARGS:+"${BENCH_MTP_ARGS[@]}"}
+            run_quality "$name" "http://127.0.0.1:8080/v1" "llamacpp_api" \
+                "$quant" "$ctx_cap" "quality_${family_id}_${quant}_mtp_${mtp_mode}"
             continue
         fi
 
@@ -315,6 +356,8 @@ while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported 
                     --cooldown "$COOLDOWN" \
                     --mem-guard "$MEM_GUARD" \
                     ${BENCH_MTP_ARGS:+"${BENCH_MTP_ARGS[@]}"}
+            run_quality "$name" "http://127.0.0.1:8080/v1" "llamacpp_api" \
+                "$quant" "$ctx_cap" "quality_${family_id}_${quant}_mtp_${mtp_mode}"
         else
             log "SKIP llama.cpp API for $family_id $quant (mtp=$mtp_mode); server did not become healthy"
         fi
@@ -384,6 +427,37 @@ while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported 
             ${SERVER_ARGS:+"${SERVER_ARGS[@]}"} \
             ${DRAFT_ARGS:+"${DRAFT_ARGS[@]}"}
 done < "$REGISTRY_TSV"
+
+# MLX quality runs in its own pass. bench_mlx_api.py owns its server's whole
+# lifecycle, so unlike the llama.cpp path there is no window where the
+# orchestrator can reach a live endpoint — it has to serve the model itself.
+if [[ ${#EVALS[@]} -gt 0 ]]; then
+    log ""
+    log "=== MLX Quality: all MLX rows ==="
+    while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture mlx_server; do
+        [[ "$backend" == "mlx" ]] || continue
+        if [[ "$DRY_RUN" == "1" ]]; then
+            log "DRY RUN quality: $family_id $quant evals=${EVALS[*]} backend=mlx_api"
+            continue
+        fi
+
+        bash scripts/serve_local.sh "$path" --backend mlx --host 127.0.0.1 \
+            >"$SERVER_LOG" 2>&1 &
+        SERVER_PID=$!
+
+        if wait_for_health "http://127.0.0.1:8085/v1/models" "mlx-server $family_id"; then
+            # Both mlx_lm.server and mlx_vlm.server accept the full model path as
+            # the request id; mlx_vlm *requires* it (see docs/ADDING_MODELS.md).
+            run_quality "$path" "http://127.0.0.1:8085/v1" "mlx_api" \
+                "$quant" "$ctx_cap" "quality_mlx_${family_id}_${quant}"
+        else
+            log "SKIP MLX quality for $family_id $quant; server did not become healthy"
+        fi
+
+        cleanup_server
+        sleep 5
+    done < "$REGISTRY_TSV"
+fi
 
 log ""
 log "=== Exhaustive benchmark finished ==="
