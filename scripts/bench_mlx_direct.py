@@ -26,8 +26,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 MLX_IMPORT_ERROR: Exception | None = None
 
 
@@ -58,7 +56,7 @@ def _safe_model_cap_ctx(model_size_gb: float, ctx_cap: int, mem_guard_pct: float
     """Estimate the largest ctx that fits within mem_guard."""
     if model_size_gb <= 0:
         return ctx_cap
-    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    total_gb = memutil.virtual_memory().total / (1024 ** 3)
     avail_gb = total_gb * (mem_guard_pct / 100.0) - model_size_gb - 2.0
     if avail_gb <= 0:
         return 0
@@ -84,16 +82,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from prompts import PASSES, build_prompt_for_pass
+import memutil
 
 
 class MemSampler:
     def __init__(self):
-        self.peak = psutil.virtual_memory().percent
+        self.peak = memutil.virtual_memory().percent
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._loop, daemon=True)
     def _loop(self):
         while not self._stop.is_set():
-            self.peak = max(self.peak, psutil.virtual_memory().percent)
+            self.peak = max(self.peak, memutil.virtual_memory().percent)
             time.sleep(0.1)
     def start(self): self._t.start()
     def stop(self) -> float:
@@ -114,7 +113,8 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                   temperature: float = 0.7, top_p: float = 0.8,
                   quant: str = "?", cooldown: int = DEFAULT_COOLDOWN,
                   mem_guard: float = 80.0, dry_run: bool = False,
-                   architecture: str = "dense", model_size_gb: float = 0.0) -> Path:
+                   architecture: str = "dense", model_size_gb: float = 0.0,
+                  top_k: int = 20) -> Path:
     model_repo = os.path.expanduser(model_repo)
     model_name = model_repo.split("/")[-1]
     run_id = str(uuid.uuid4())[:8]
@@ -154,7 +154,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
         sys.exit(1)
     load, stream_generate, make_sampler, mx = mlx_modules
 
-    sampler = make_sampler(temp=temperature, top_p=top_p)
+    sampler = make_sampler(temp=temperature, top_p=top_p, top_k=top_k)
     draft = None
     if draft_model:
         print(f"  Loading draft model: {draft_model} ...")
@@ -173,7 +173,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                     "model_name": model_name, "backend": "MLX_DIRECT", "pass_name": p["id"],
                     "ctx_cap": ctx_cap, "ctx_used": 0, "prompt_tokens": 0, "gen_tokens": 0,
                     "prompt_tps": 0.0, "gen_tps": 0.0, "ttft_s": 0.0,
-                    "peak_mem_pct": round(psutil.virtual_memory().percent, 1),
+                    "peak_mem_pct": round(memutil.virtual_memory().percent, 1),
                     "status": "skipped_kv_oom", "quant": quant, "concurrency": 1,
                     "mtp": "on" if draft else "off", "draft_tokens": 0, "draft_accepted_tokens": 0, "draft_accept_rate": 0.0, "token_count_method": "none", "generated_text": ""}, out_csv)
                 print(f"  SKIP {p['id']}: would OOM at ctx_cap={ctx_cap}")
@@ -186,7 +186,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
         ctx_used = min(raw_ctx, ctx_cap)
         prompt_text, target_prompt_tokens = build_prompt_for_pass(p, ctx_used)
 
-        mem_pct = psutil.virtual_memory().percent
+        mem_pct = memutil.virtual_memory().percent
         if mem_pct >= mem_guard:
             _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
                 "model_name": model_name, "backend": "MLX_DIRECT", "pass_name": p["id"],
@@ -269,6 +269,7 @@ def main() -> None:
     ap.add_argument("--ctx-cap", type=int, default=131072)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.8)
+    ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--quant", type=str, default="?", help="Quant label for CSV")
     ap.add_argument("--architecture", choices=["dense", "moe"], default="dense",
                     help="Architecture hint for ctx clamping (dense >20GB clamps high passes)")
@@ -281,7 +282,7 @@ def main() -> None:
     run_benchmark(args.model, selected_passes, args.output_dir,
                   args.draft_model, args.ctx_cap, args.temperature, args.top_p,
                   args.quant, args.cooldown, args.mem_guard, args.dry_run,
-                  args.architecture, args.model_size_gb)
+                  args.architecture, args.model_size_gb, top_k=args.top_k)
 
 
 if __name__ == "__main__":

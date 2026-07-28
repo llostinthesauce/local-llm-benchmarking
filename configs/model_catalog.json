@@ -1,6 +1,20 @@
 {
   "_comment": "Public model metadata and discovery rules. No local machine paths belong in this file.",
   "_schema_version": 1,
+  "_sampling_notes": {
+    "qwen3": {
+      "instruct_general": "temp=0.7 top_p=0.8 top_k=20 (presence_penalty=1.5 if supported)",
+      "instruct_reasoning": "temp=1.0 top_p=0.95 top_k=20",
+      "thinking_general": "temp=1.0 top_p=0.95 top_k=20 (presence_penalty=1.5 if supported)",
+      "thinking_coding": "temp=0.6 top_p=0.95 top_k=20",
+      "registry_default": "instruct_general — conservative for non-thinking coding agents"
+    },
+    "gemma4": {
+      "all_modes": "temp=1.0 top_p=0.95 top_k=64 (single recommended config per model card)",
+      "thinking": "add <|think|> to system prompt to enable; <|channel>thought\\n...</channel|> wraps reasoning",
+      "registry_default": "matches model card exactly"
+    }
+  },
   "defaults": {
     "ctx_cap": 131072,
     "temperature": 0.7,
@@ -21,7 +35,7 @@
         "Qwen3\\.6-35B-A3B(?!.*MTP).*\\.gguf$"
       ],
       "mlx_patterns": [
-        "Qwen3\\.[56]-35B-A3B.*(?:mlx|4bit)"
+        "Qwen3\\.[56]-35B-A3B.*(?:mlx|4bit|5bit|6bit|8bit)"
       ]
     },
     {
@@ -37,7 +51,7 @@
         "Qwen3\\.6-27B.*\\.gguf$"
       ],
       "mlx_patterns": [
-        "Qwen3\\.[56]-27B.*(?:mlx|4bit)"
+        "Qwen3\\.[56]-27B.*(?:mlx|4bit|5bit|6bit|8bit)"
       ]
     },
     {
@@ -46,14 +60,14 @@
       "family": "gemma4",
       "architecture": "moe",
       "ctx_cap": 262144,
-      "temperature": 0.7,
+      "temperature": 1.0,
       "top_p": 0.95,
       "top_k": 64,
       "gguf_patterns": [
-        "gemma-4-26B-A4B.*\\.gguf$"
+        "gemma-4-26[Bb]-[Aa]4[Bb].*\\.gguf$"
       ],
       "mlx_patterns": [
-        "gemma-4-26b-a4b.*(?:mlx|4bit)"
+        "gemma-4-26[Bb]-[Aa]4[Bb].*(?:mlx|4bit|5bit|6bit|8bit|qat)"
       ]
     },
     {
@@ -62,32 +76,14 @@
       "family": "gemma4",
       "architecture": "dense",
       "ctx_cap": 262144,
-      "temperature": 0.7,
+      "temperature": 1.0,
       "top_p": 0.95,
       "top_k": 64,
       "gguf_patterns": [
-        "gemma-4-31B.*\\.gguf$",
-        "gemma-4-31b.*\\.gguf$"
+        "gemma-4-31[Bb].*\\.gguf$"
       ],
       "mlx_patterns": [
-        "gemma-4-31b.*(?:MLX|mlx|4bit|8bit)"
-      ]
-    },
-    {
-      "id": "gemma4_12b_dense",
-      "name": "Gemma 4 12B (Dense)",
-      "family": "gemma4",
-      "architecture": "dense",
-      "ctx_cap": 131072,
-      "temperature": 0.7,
-      "top_p": 0.95,
-      "top_k": 64,
-      "gguf_patterns": [
-        "gemma-4-12B.*\\.gguf$",
-        "gemma-4-12b.*\\.gguf$"
-      ],
-      "mlx_patterns": [
-        "gemma-4-12b.*(?:MLX|mlx|4bit|8bit)"
+        "gemma-4-31[Bb].*(?:MLX|mlx|4bit|5bit|6bit|8bit)"
       ]
     },
     {
@@ -96,16 +92,65 @@
       "family": "gemma4",
       "architecture": "dense",
       "ctx_cap": 131072,
-      "temperature": 0.7,
+      "temperature": 1.0,
       "top_p": 0.95,
       "top_k": 64,
       "gguf_patterns": [
-        "gemma-4-E4B.*\\.gguf$",
-        "gemma-4-e4b.*\\.gguf$"
+        "gemma-4-[Ee]4[Bb].*\\.gguf$"
       ],
       "mlx_patterns": [
-        "gemma-4-E4B.*(?:MLX|mlx|4bit)",
-        "gemma-4-e4b.*(?:MLX|mlx|4bit)"
+        "gemma-4-[Ee]4[Bb].*(?:MLX|mlx|4bit)"
+      ]
+    },
+    {
+      "id": "laguna_xs_33b_moe",
+      "name": "Poolside Laguna XS 2.1 (33B-A3B MoE)",
+      "family": "laguna",
+      "architecture": "moe",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "_notes": "Released 2026-07-02, OpenMDW-1.1. Built for agentic coding on a single machine — the closest direct rival to Qwen3.6-35B-A3B on this hardware. Official GGUF at poolside/Laguna-XS-2.1-GGUF (Q4_K_M recommended); community MLX at AtomicChat/Laguna-XS-2.1-MLX-5bit. Sampling values here are the catalog defaults, NOT verified model-card values — check the card before quoting quality numbers.",
+      "gguf_patterns": [
+        "Laguna-XS-2\\.1.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "Laguna-XS-2\\.1.*(?:MLX|mlx|4bit|5bit|6bit|8bit)"
+      ]
+    },
+    {
+      "id": "north_mini_code_30b_moe",
+      "name": "Cohere North Mini Code 1.0 (30B-A3B MoE)",
+      "family": "north",
+      "architecture": "moe",
+      "ctx_cap": 262144,
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "top_k": 20,
+      "_notes": "Released 2026-06-09, Apache-2.0. 256K context, 64K max output, tuned for agentic software engineering. GGUF uses the cohere2moe architecture, which stock llama.cpp cannot load until PR #24260 lands — build from that branch or the model will fail to load. Sampling values are catalog defaults, NOT verified model-card values.",
+      "gguf_patterns": [
+        "North-Mini-Code-1\\.0.*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "North-Mini-Code-1\\.0.*(?:MLX|mlx|4bit|5bit|6bit|8bit)"
+      ]
+    },
+    {
+      "id": "gemma4_12b_dense",
+      "name": "Gemma 4 12B (Dense, encoder-free unified)",
+      "family": "gemma4",
+      "architecture": "dense",
+      "ctx_cap": 131072,
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": 64,
+      "_notes": "model_type gemma4_unified — encoder-free architecture. Cannot load under mlx_lm; must use mlx_vlm >= 0.6.1.",
+      "gguf_patterns": [
+        "gemma-4-12[Bb].*\\.gguf$"
+      ],
+      "mlx_patterns": [
+        "gemma-4-12[Bb].*(?:MLX|mlx|4bit|8bit|qat)"
       ]
     }
   ]

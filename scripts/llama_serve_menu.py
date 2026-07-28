@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Interactive and CLI launcher for local model serving.
+Interactive and CLI launcher for local model serving (the "python llama TUI").
 
 This is the repo-owned replacement for hardcoded global launcher menus. Global
 entrypoints should call this file, and this file resolves models from
-configs/models.local.json via scripts/model_registry.py.
+configs/models.local.json via scripts/model_registry.py, then hands off to
+scripts/serve_local.sh.
+
+Backends offered: llamacpp, mlx, mlx-kv (KV q8 turboquant), omlx. When a model
+has mtp_supported=true in the registry, the llama.cpp option is tagged "+ MTP"
+and serve_local.sh auto-enables Multi-Token Prediction speculative decoding.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import subprocess
 import sys
 import termios
 import tty
+import urllib.request
 from pathlib import Path
 
 import model_registry
@@ -22,6 +28,9 @@ import model_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVE_SCRIPT = ROOT / "scripts" / "serve_local.sh"
+
+OMLX_BASE_URL = "http://127.0.0.1:8123/v1"
+OMLX_API_KEY = "abcd"
 
 
 def _rows() -> list[dict]:
@@ -38,6 +47,7 @@ def _rows() -> list[dict]:
                 "aliases": aliases,
                 "backends": set(),
                 "quant": row.get("quant", "?"),
+                "use_case": row.get("use_case", ""),
             }
         # Only surface a backend if its model is actually on disk. A registry row
         # whose file is missing must not be offered — selecting it would either
@@ -53,7 +63,21 @@ def _rows() -> list[dict]:
 
 def _display_label(row: dict) -> str:
     backends = ", ".join(b for b in row["backends"] if b in ("llamacpp", "mlx"))
-    return f"{row['family_id']} [{backends or 'unavailable'}]"
+    base = f"{row['family_id']:<20} [{backends or 'unavailable'}]"
+    use_case = row.get("use_case", "")
+    return f"{base}  — {use_case}" if use_case else base
+
+
+def _omlx_running() -> bool:
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:8123/health",
+            headers={"Authorization": f"Bearer {OMLX_API_KEY}"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def _supported_backends(selector: str) -> list[str]:
@@ -66,6 +90,9 @@ def _supported_backends(selector: str) -> list[str]:
             continue
         if row.get("exists"):
             found.append(backend)
+    if "mlx" in found:
+        found.append("mlx-kv")
+        found.append("omlx")
     return found
 
 
@@ -129,8 +156,36 @@ def _kill_port(port: str, dry_run: bool) -> None:
         subprocess.run(["kill", pid], check=False)
 
 
+def _launch_omlx(selector: str, dry_run: bool) -> None:
+    try:
+        row = model_registry.resolve(selector, "mlx", model_registry.DEFAULT_CONFIG)
+        model_id = Path(row["path"]).name
+    except SystemExit:
+        model_id = selector
+
+    if dry_run:
+        print(f"DRY RUN: oMLX at {OMLX_BASE_URL} — model ID: {model_id}")
+        return
+
+    if not _omlx_running():
+        raise SystemExit(
+            "oMLX is not responding at 127.0.0.1:8123.\n"
+            "Start it with: omlx restart\n"
+            f"Then connect at: {OMLX_BASE_URL}  (key: {OMLX_API_KEY})"
+        )
+
+    print(f"oMLX is running.")
+    print(f"  Endpoint:  {OMLX_BASE_URL}")
+    print(f"  Model ID:  {model_id}")
+    print(f"  Auth:      Bearer {OMLX_API_KEY}")
+
+
 def _launch(selector: str, backend: str, port: str | None, host: str | None,
             dry_run: bool, kill_port: bool) -> None:
+    if backend == "omlx":
+        _launch_omlx(selector, dry_run)
+        return
+
     cmd = [str(SERVE_SCRIPT), selector, "--backend", backend]
     if port:
         cmd.append(port)
@@ -139,7 +194,7 @@ def _launch(selector: str, backend: str, port: str | None, host: str | None,
     if dry_run:
         cmd.append("--dry-run")
 
-    effective_port = port or ("8085" if backend == "mlx" else "8080")
+    effective_port = port or ("8085" if backend in ("mlx", "mlx-kv", "mlx-vlm") else "8080")
     if kill_port:
         _kill_port(effective_port, dry_run)
 
@@ -159,7 +214,7 @@ def _print_list() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch a local model API server")
     parser.add_argument("selector", nargs="?", help="Model alias, family id, path, or repo")
-    parser.add_argument("--backend", choices=["llamacpp", "mlx"], help="Serving backend")
+    parser.add_argument("--backend", choices=["llamacpp", "mlx", "mlx-kv", "mlx-vlm", "omlx"], help="Serving backend")
     parser.add_argument("--port", help="Port override")
     parser.add_argument("--host", help="Host override")
     parser.add_argument("--dry-run", action="store_true")
@@ -178,19 +233,33 @@ def main() -> None:
         family = _choose(_rows(), "Local model server", _display_label)
         selector = family["family_id"]
         supported = list(family["backends"])
+        if "mlx" in supported:
+            supported.append("mlx-kv")
+            supported.append("omlx")
     else:
         supported = _supported_backends(selector)
 
     if not backend:
         host_label = args.host or "127.0.0.1"
+        # Tag the llama.cpp option when this model carries an MTP head, so the
+        # picker shows that serve_local.sh will turn on speculative decoding.
+        mtp_tag = ""
+        try:
+            ll_row = model_registry.resolve(selector, "llamacpp", model_registry.DEFAULT_CONFIG)
+            if ll_row.get("mtp_supported"):
+                mtp_tag = " + MTP"
+        except SystemExit:
+            pass
         labels = {
-            "llamacpp": f"llama.cpp API on {host_label}:8080",
-            "mlx": f"MLX API on {host_label}:8085",
+            "llamacpp": f"llama.cpp API on {host_label}:8080{mtp_tag}",
+            "mlx": f"MLX API on {host_label}:8085 (mlx_lm, no KV quant)",
+            "mlx-kv": f"MLX API on {host_label}:8085 (mlx_vlm + KV q8 turboquant)",
+            "omlx": f"oMLX (always-on) on 127.0.0.1:8123",
         }
         # Only offer backends this model actually has on disk — a one-backend
         # model skips the prompt entirely instead of falsely showing both.
         backend_choices = [
-            {"backend": b, "label": labels[b]} for b in ("llamacpp", "mlx") if b in supported
+            {"backend": b, "label": labels[b]} for b in ("llamacpp", "mlx", "mlx-kv", "omlx") if b in supported
         ]
         if not backend_choices:
             raise SystemExit(
@@ -210,4 +279,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

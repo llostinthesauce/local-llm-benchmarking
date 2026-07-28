@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local LLM</title>
+<style>
+  :root {
+    --bg: #0e0f13; --panel: #16181f; --panel-2: #1c1f28; --line: #262a35;
+    --ink: #e8eaf0; --muted: #8b90a0; --accent: #7c9cff;
+    --green: #46d39a; --red: #ff6b6b; --amber: #f6c177;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--sans);
+    display: grid; grid-template-columns: 340px 1fr; height: 100vh; overflow: hidden;
+  }
+
+  /* ---- left rail ---- */
+  .rail { background: var(--panel); border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; min-height: 0; }
+  .rail header { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 650; letter-spacing: .3px; font-size: 15px; }
+  .brand small { color: var(--muted); font-weight: 400; }
+
+  .ports { display: flex; gap: 14px; margin-top: 12px; font: 500 11px/1 var(--mono); }
+  .port { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3f4d;
+         box-shadow: 0 0 0 0 transparent; transition: .2s; }
+  .dot.up { background: var(--green); box-shadow: 0 0 8px 0 rgba(70,211,154,.6); }
+
+  .list { overflow-y: auto; flex: 1; padding: 8px; min-height: 0; }
+  .group-label { color: var(--muted); font: 600 10px/1 var(--mono); letter-spacing: 1px;
+                 text-transform: uppercase; padding: 14px 10px 6px; }
+  .model { padding: 9px 11px; border-radius: 9px; cursor: pointer; border: 1px solid transparent;
+           transition: background .12s, border-color .12s; }
+  .model:hover { background: var(--panel-2); }
+  .model.sel { background: var(--panel-2); border-color: var(--accent); }
+  .model .name { font-weight: 550; font-size: 13.5px; }
+  .model .meta { color: var(--muted); font: 400 11px/1.4 var(--mono); margin-top: 3px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { display: inline-block; font: 600 9px/1 var(--mono); padding: 3px 5px; border-radius: 4px;
+         vertical-align: middle; margin-left: 6px; }
+  .tag.base { background: #2a2233; color: #c9a4ff; }
+  .tag.mtp { background: #1f2e2a; color: var(--green); }
+
+  /* ---- launch controls ---- */
+  .controls { border-top: 1px solid var(--line); padding: 14px 16px; display: none; gap: 10px;
+              flex-direction: column; background: var(--panel); }
+  .controls.show { display: flex; }
+  .ctl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ctl-row label { font: 500 11px/1 var(--mono); color: var(--muted); }
+  select, .seg button {
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 9px; font: 500 12px var(--sans); cursor: pointer;
+  }
+  .seg { display: inline-flex; border-radius: 7px; overflow: hidden; border: 1px solid var(--line); }
+  .seg button { border: none; border-right: 1px solid var(--line); border-radius: 0; }
+  .seg button:last-child { border-right: none; }
+  .seg button.on { background: var(--accent); color: #0b0d12; font-weight: 600; }
+  .check { display: flex; align-items: center; gap: 6px; font: 500 12px var(--sans); cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+  .check.disabled { opacity: .4; cursor: not-allowed; }
+  .btns { display: flex; gap: 8px; }
+  .btn { flex: 1; padding: 9px; border-radius: 8px; border: none; cursor: pointer;
+         font: 600 13px var(--sans); transition: filter .12s; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.launch { background: var(--accent); color: #0b0d12; }
+  .btn.stop { background: var(--panel-2); color: var(--red); border: 1px solid var(--line); }
+  .running { font: 500 11px/1.4 var(--mono); color: var(--muted); display: none; }
+  .running.show { display: block; }
+  .running .live { color: var(--green); }
+  .running b { color: var(--ink); font-weight: 600; }
+  .backend-fixed { font: 500 12px var(--mono); color: var(--ink); padding: 5px 0; }
+
+  /* ---- main / chat ---- */
+  .main { display: flex; flex-direction: column; min-height: 0; }
+  .topbar { padding: 14px 22px; border-bottom: 1px solid var(--line); display: flex;
+            align-items: center; gap: 12px; }
+  .topbar .who { font-weight: 600; }
+  .topbar .mode { color: var(--muted); font: 500 11px var(--mono); padding: 3px 8px;
+                  border: 1px solid var(--line); border-radius: 20px; }
+  .topbar .spacer { flex: 1; }
+  .topbar button { background: transparent; color: var(--muted); border: 1px solid var(--line);
+                   border-radius: 7px; padding: 6px 11px; cursor: pointer; font: 500 12px var(--sans); }
+  .topbar button:hover { color: var(--ink); }
+
+  .scroll { flex: 1; overflow-y: auto; min-height: 0; }
+  .thread { max-width: 820px; margin: 0 auto; padding: 26px 22px 40px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 18vh; font-size: 14px; }
+  .empty .big { font-size: 40px; margin-bottom: 14px; opacity: .5; }
+
+  .msg { margin: 0 0 20px; }
+  .msg .role { font: 600 10px/1 var(--mono); letter-spacing: 1px; text-transform: uppercase;
+               color: var(--muted); margin-bottom: 7px; }
+  .msg.user .role { color: var(--accent); }
+  .bubble { white-space: pre-wrap; line-height: 1.6; font-size: 14.5px; word-wrap: break-word; }
+  .msg.user .bubble { color: var(--ink); }
+  .msg.assistant .bubble { color: #d3d7e3; }
+  .msg .stats { margin-top: 7px; color: var(--muted); font: 500 11px/1 var(--mono);
+                letter-spacing: .2px; }
+  .msg .stats b { color: #9aa0b4; font-weight: 600; }
+
+  /* base continuation: one growing document */
+  .doc { max-width: 820px; margin: 0 auto; padding: 26px 22px; }
+  .doc textarea {
+    width: 100%; min-height: 60vh; resize: vertical; background: var(--panel);
+    color: var(--ink); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; font: 400 14.5px/1.7 var(--mono); white-space: pre-wrap;
+  }
+  .doc textarea:focus { outline: none; border-color: var(--accent); }
+  .doc .gen { color: var(--amber); }
+
+  /* ---- composer ---- */
+  .composer { border-top: 1px solid var(--line); padding: 16px 22px; }
+  .composer .wrap { max-width: 820px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+  textarea.input {
+    flex: 1; background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; font: 400 14px/1.5 var(--sans); resize: none;
+    max-height: 180px; min-height: 46px;
+  }
+  textarea.input:focus { outline: none; border-color: var(--accent); }
+  .send { background: var(--accent); color: #0b0d12; border: none; border-radius: 12px;
+          width: 46px; height: 46px; cursor: pointer; font-size: 18px; flex: none; }
+  .send:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ---- params + history panels (slide down under topbar) ---- */
+  .panel-drop { border-bottom: 1px solid var(--line); background: var(--panel);
+                display: none; padding: 14px 22px; }
+  .panel-drop.show { display: block; }
+  .panel-drop .inner { max-width: 820px; margin: 0 auto; }
+  .params-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font: 600 10px/1 var(--mono); letter-spacing: .5px; color: var(--muted);
+                 text-transform: uppercase; }
+  .field input { background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+                 color: var(--ink); padding: 7px 9px; font: 500 13px var(--mono); width: 100%; }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .raw { margin-top: 12px; display: flex; flex-direction: column; gap: 4px; }
+  .raw textarea { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+                  color: var(--ink); padding: 9px 11px; font: 400 12px/1.5 var(--mono);
+                  resize: vertical; min-height: 52px; }
+  .raw textarea:focus { outline: none; border-color: var(--accent); }
+  .raw .hint { color: var(--muted); font: 400 10px var(--mono); }
+  .params-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .params-foot .reset { background: transparent; color: var(--muted); border: 1px solid var(--line);
+                        border-radius: 7px; padding: 6px 11px; cursor: pointer; font: 500 12px var(--sans); }
+  .params-foot .note { color: var(--muted); font: 400 11px var(--mono); }
+
+  .convo-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px;
+               border-bottom: 1px solid var(--line); }
+  .convo-row:last-child { border-bottom: none; }
+  .convo-row .cname { flex: 1; font-size: 13px; cursor: pointer; }
+  .convo-row .cname:hover { color: var(--accent); }
+  .convo-row .cmeta { color: var(--muted); font: 400 11px var(--mono); }
+  .convo-row .del { background: transparent; border: none; color: var(--muted); cursor: pointer;
+                    font-size: 15px; padding: 2px 6px; }
+  .convo-row .del:hover { color: var(--red); }
+  .convo-empty { color: var(--muted); font-size: 13px; padding: 6px 4px; }
+  .topbar .on { color: var(--accent); border-color: var(--accent); }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+           background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+           padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0;
+           transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--red); color: #ffb4b4; }
+
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2b2f3b; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <aside class="rail">
+    <header>
+      <div class="brand">Local&nbsp;LLM <small>· benchmarking stack</small></div>
+      <div class="ports" id="ports"></div>
+    </header>
+    <div class="list" id="list"></div>
+    <div class="controls" id="controls">
+      <div class="ctl-row" id="backendRow">
+        <label>backend</label>
+        <div class="seg" id="backends"></div>
+      </div>
+      <div class="ctl-row">
+        <label class="check" id="mtpWrap">
+          <input type="checkbox" id="mtp" checked> MTP speculative decode
+        </label>
+      </div>
+      <div class="btns">
+        <button class="btn launch" id="launch">Launch</button>
+        <button class="btn stop" id="stop">Stop</button>
+      </div>
+      <div class="running" id="running"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <span class="who" id="who">No model selected</span>
+      <span class="mode" id="mode" style="display:none"></span>
+      <span class="spacer"></span>
+      <button id="paramsBtn">⚙ Params</button>
+      <button id="histBtn">≡ History</button>
+      <button id="saveBtn">Save</button>
+      <button id="clear">Clear</button>
+    </div>
+
+    <div class="panel-drop" id="paramsPanel">
+      <div class="inner">
+        <div class="params-grid">
+          <div class="field"><label>temperature</label><input id="pTemp" type="number" step="0.05" min="0" placeholder="server default"></div>
+          <div class="field"><label>top_p</label><input id="pTopP" type="number" step="0.01" min="0" max="1" placeholder="default"></div>
+          <div class="field"><label>top_k</label><input id="pTopK" type="number" step="1" min="0" placeholder="default"></div>
+          <div class="field"><label>max_tokens</label><input id="pMaxTokens" type="number" step="16" min="1" placeholder="2048"></div>
+          <div class="field"><label>seed</label><input id="pSeed" type="number" step="1" placeholder="random"></div>
+        </div>
+        <div class="raw">
+          <label class="hint">raw JSON override — merged last, wins over the fields above (any OpenAI param)</label>
+          <textarea id="pRaw" spellcheck="false" placeholder='{"repeat_penalty": 1.1, "min_p": 0.05}'></textarea>
+        </div>
+        <div class="params-foot">
+          <button class="reset" id="pReset">Reset</button>
+          <span class="note">Applies to the next message. Empty fields use the server's registry defaults.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-drop" id="histPanel">
+      <div class="inner" id="histList"></div>
+    </div>
+
+    <div class="scroll" id="scroll">
+      <div class="empty" id="empty">
+        <div class="big">◍</div>
+        Pick a model on the left, launch it, then start chatting.
+      </div>
+      <div class="thread" id="thread" style="display:none"></div>
+      <div class="doc" id="doc" style="display:none">
+        <textarea id="docArea" placeholder="Base model — type the start of some text, then press ⌘↵ (Ctrl+↵) and it continues it…"></textarea>
+      </div>
+    </div>
+    <div class="composer" id="composer" style="display:none">
+      <div class="wrap">
+        <textarea class="input" id="input" rows="1" placeholder="Message…"></textarea>
+        <button class="send" id="send">↑</button>
+      </div>
+    </div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  catalog: { instruct: [], base: [] },
+  selected: null,       // model object
+  backend: null,        // chosen launch backend
+  activePort: null,     // port we're chatting with
+  running: null,        // { label, backend, port } of the launched model
+  messages: [],         // instruct history
+  streaming: false,
+};
+
+// ---- toast ----
+let toastTimer;
+function toast(msg, isErr) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = 'toast'), 2600);
+}
+
+// ---- status polling ----
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const { ports } = await r.json();
+    const map = {};
+    $('ports').innerHTML = ports.map(p => {
+      map[p.port] = p;
+      return `<span class="port"><span class="dot ${p.up ? 'up' : ''}"></span>:${p.port}</span>`;
+    }).join('');
+    state.portInfo = map;
+  } catch (_) { /* server down; ignore */ }
+}
+
+// ---- model list ----
+async function loadModels() {
+  const r = await fetch('/api/models');
+  state.catalog = await r.json();
+  renderList();
+}
+
+function renderList() {
+  const groups = [['instruct', 'Instruct'], ['base', 'Base']];
+  let html = '';
+  for (const [key, title] of groups) {
+    const items = state.catalog[key] || [];
+    if (!items.length) continue;
+    html += `<div class="group-label">${title}</div>`;
+    for (const m of items) {
+      const sel = state.selected && state.selected.id === m.id && state.selected.type === m.type;
+      const tags = (m.type === 'base' ? '<span class="tag base">BASE</span>' : '')
+                 + (m.mtp_supported ? '<span class="tag mtp">MTP</span>' : '');
+      html += `<div class="model ${sel ? 'sel' : ''}" data-type="${m.type}" data-id="${m.id}">
+        <div class="name">${m.label}${tags}</div>
+        <div class="meta">${(m.backends || []).join(' · ')}${m.use_case ? ' — ' + m.use_case : ''}</div>
+      </div>`;
+    }
+  }
+  $('list').innerHTML = html;
+  $('list').querySelectorAll('.model').forEach(el => {
+    el.onclick = () => selectModel(el.dataset.type, el.dataset.id);
+  });
+}
+
+function selectModel(type, id) {
+  const m = (state.catalog[type] || []).find(x => x.id === id);
+  if (!m) return;
+  state.selected = m;
+  state.backend = m.backends[0];
+  renderList();
+  renderControls();
+}
+
+// Human name for the exact server a backend runs on.
+function backendLabel(m, backend, noMtp) {
+  if (backend === 'llamacpp') return 'llama.cpp' + (m.mtp_supported && !noMtp ? ' + MTP' : '');
+  if (backend === 'mlx') return m.mlx_server === 'mlx_vlm' ? 'mlx_vlm' : 'mlx_lm';
+  return backend;
+}
+
+function renderControls() {
+  const m = state.selected;
+  $('controls').classList.add('show');
+  // Only show the backend chooser when there's a genuine choice; a single-backend
+  // model just launches (its exact server is named in the running indicator).
+  if (m.backends.length > 1) {
+    $('backendRow').style.display = 'flex';
+    $('backends').innerHTML = m.backends.map(b =>
+      `<button class="${b === state.backend ? 'on' : ''}" data-b="${b}">${backendLabel(m, b)}</button>`
+    ).join('');
+    $('backends').querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => { state.backend = btn.dataset.b; renderControls(); };
+    });
+  } else {
+    $('backendRow').style.display = 'none';
+  }
+  // MTP toggle only when it can take effect (llamacpp + an on-disk MTP head);
+  // hidden entirely otherwise rather than shown greyed-out.
+  const mtpUsable = m.mtp_supported && state.backend === 'llamacpp';
+  $('mtpWrap').style.display = mtpUsable ? 'flex' : 'none';
+}
+
+function renderRunning() {
+  const el = $('running');
+  if (state.running) {
+    el.className = 'running show';
+    el.innerHTML = `<span class="live">●</span> running <b>${state.running.label}</b><br>`
+                 + `backend: <b>${state.running.backend}</b> · :${state.running.port}`;
+  } else {
+    el.className = 'running';
+    el.innerHTML = '';
+  }
+}
+
+// ---- launch / stop ----
+async function launch() {
+  const m = state.selected;
+  if (!m) return;
+  const selector = m.type === 'base' ? m.path : m.id;
+  // MTP defaults on; send no_mtp only when the (usable) checkbox is unchecked.
+  const mtpUsable = m.mtp_supported && state.backend === 'llamacpp';
+  const noMtp = mtpUsable && !$('mtp').checked;
+  toast(`Launching ${m.label} (${state.backend})… first load can take a minute`);
+  try {
+    const r = await fetch('/api/serve', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selector, backend: state.backend, no_mtp: noMtp }),
+    });
+    const data = await r.json();
+    if (!data.ok) { toast(data.error || 'Launch failed', true); return; }
+    state.activePort = data.port;
+    state.running = { label: m.label, backend: backendLabel(m, state.backend, noMtp), port: data.port };
+    renderRunning();
+    openChat();
+    waitForReady(data.port);
+  } catch (e) { toast(String(e), true); }
+}
+
+async function waitForReady(port) {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    await pollStatus();
+    if (state.portInfo && state.portInfo[port] && state.portInfo[port].up) {
+      toast('Model ready ✓');
+      return;
+    }
+  }
+}
+
+async function stopModel() {
+  if (!state.activePort) { toast('Nothing running', true); return; }
+  await fetch('/api/stop', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ port: state.activePort }),
+  });
+  state.activePort = null;
+  state.running = null;
+  renderRunning();
+  toast('Stopped');
+  pollStatus();
+}
+
+// ---- chat view wiring ----
+function openChat(preserve) {
+  const m = state.selected;
+  $('empty').style.display = 'none';
+  $('composer').style.display = m.type === 'instruct' ? 'block' : 'none';
+  $('thread').style.display = m.type === 'instruct' ? 'block' : 'none';
+  $('doc').style.display = m.type === 'base' ? 'block' : 'none';
+  $('who').textContent = m.label;
+  const mode = $('mode');
+  mode.style.display = 'inline-block';
+  mode.textContent = m.type === 'instruct' ? 'chat' : 'completion';
+  if (m.type === 'instruct') { if (!preserve) state.messages = []; renderThread(); }
+  else if (!preserve) { $('docArea').value = ''; }
+}
+
+function statsLine(s) {
+  if (!s) return '';
+  const tps = (s.tps != null) ? ` · <b>${s.tps.toFixed(0)}</b> tps` : '';
+  return `<div class="stats"><b>${s.tokens}</b> tok · TTFT <b>${s.ttft.toFixed(2)}s</b>${tps}</div>`;
+}
+
+function renderThread() {
+  $('thread').innerHTML = state.messages.map(msg =>
+    `<div class="msg ${msg.role}">
+       <div class="role">${msg.role}</div>
+       <div class="bubble">${escapeHtml(msg.content)}</div>
+       ${msg.role === 'assistant' ? statsLine(msg.stats) : ''}
+     </div>`
+  ).join('');
+  $('scroll').scrollTop = $('scroll').scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+// ---- streaming: instruct (chat) ----
+async function sendChat() {
+  if (state.streaming) return;
+  const text = $('input').value.trim();
+  if (!text) return;
+  if (!state.activePort) { toast('Launch the model first', true); return; }
+  $('input').value = '';
+  autosize($('input'));
+  state.messages.push({ role: 'user', content: text });
+  state.messages.push({ role: 'assistant', content: '' });
+  renderThread();
+  const assistant = state.messages[state.messages.length - 1];
+
+  let payload;
+  try {
+    payload = buildParams({
+      messages: state.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+      stream: true,
+    }, 2048);
+  } catch (_) { state.messages.pop(); state.messages.pop(); renderThread(); return; }
+  const stats = await streamInto(`/v1/chat/completions?port=${state.activePort}`, payload, (delta) => {
+    assistant.content += delta;
+    renderThread();
+  }, (d) => {
+    // Reasoning models stream thinking, not content, on short turns — show it so
+    // the bubble isn't empty. Field name differs by server: mlx_lm uses
+    // `reasoning`, llama.cpp uses `reasoning_content`.
+    const x = d.choices?.[0]?.delta || {};
+    return x.content ?? x.reasoning ?? x.reasoning_content ?? '';
+  });
+  if (stats) { assistant.stats = stats; renderThread(); }
+  persistCurrent();
+}
+
+// ---- streaming: base (completion) ----
+async function sendCompletion() {
+  if (state.streaming) return;
+  if (!state.activePort) { toast('Launch the model first', true); return; }
+  const area = $('docArea');
+  const prompt = area.value;
+  if (!prompt.trim()) { toast('Type some opening text first', true); return; }
+  let payload;
+  try { payload = buildParams({ prompt, stream: true }, 256); }
+  catch (_) { return; }
+  area.classList.add('gen');
+  const stats = await streamInto(`/v1/completions?port=${state.activePort}`, payload, (delta) => {
+    area.value += delta;
+    area.scrollTop = area.scrollHeight;
+  }, (d) => d.choices?.[0]?.text || '');
+  area.classList.remove('gen');
+  area.focus();
+  if (stats) {
+    const tps = stats.tps != null ? ` · ${stats.tps.toFixed(0)} tps` : '';
+    toast(`${stats.tokens} tok · TTFT ${stats.ttft.toFixed(2)}s${tps}`);
+  }
+}
+
+// Streams an SSE response, feeding text deltas to onDelta, and returns timing
+// metrics: { tokens, ttft (s), tps }. Token count prefers the server's usage
+// when present, else counts streamed deltas (≈1 token each for these servers).
+async function streamInto(url, payload, onDelta, pick) {
+  state.streaming = true;
+  $('send').disabled = true;
+  const t0 = performance.now();
+  let tFirst = null, tokens = 0, usage = null;
+  try {
+    const resp = await fetch(url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      toast('Backend error: ' + err.slice(0, 160), true);
+      return null;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const data = t.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let obj;
+        try { obj = JSON.parse(data); } catch (_) { continue; }
+        if (obj.usage) usage = obj.usage;
+        let piece = '';
+        try { piece = pick(obj) || ''; } catch (_) {}
+        if (piece) {
+          if (tFirst === null) tFirst = performance.now();
+          tokens++;
+          onDelta(piece);
+        }
+      }
+    }
+  } catch (e) {
+    toast(String(e), true);
+  } finally {
+    state.streaming = false;
+    $('send').disabled = false;
+  }
+  if (tFirst === null) return null;
+  const tEnd = performance.now();
+  const count = usage?.completion_tokens ?? tokens;
+  const genSec = (tEnd - tFirst) / 1000;
+  return { tokens: count, ttft: (tFirst - t0) / 1000, tps: genSec > 0 ? count / genSec : null };
+}
+
+// ---- composer UX ----
+function autosize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 180) + 'px'; }
+$('input').addEventListener('input', e => autosize(e.target));
+$('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+$('docArea').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); sendCompletion(); }
+});
+$('send').onclick = sendChat;
+$('launch').onclick = launch;
+$('stop').onclick = stopModel;
+$('clear').onclick = () => {
+  if (!state.selected) return;
+  if (state.selected.type === 'instruct') { state.messages = []; renderThread(); persistCurrent(); }
+  else { $('docArea').value = ''; }
+};
+
+// ---- request parameters (named fields + raw JSON override) ----
+function buildParams(base, defaultMaxTokens) {
+  const p = { ...base };
+  const num = (id) => { const v = $(id).value.trim(); return v === '' ? null : Number(v); };
+  for (const [key, id] of [['temperature','pTemp'],['top_p','pTopP'],['top_k','pTopK'],
+                           ['max_tokens','pMaxTokens'],['seed','pSeed']]) {
+    const v = num(id);
+    if (v !== null && !Number.isNaN(v)) p[key] = v;
+  }
+  if (p.max_tokens === undefined) p.max_tokens = defaultMaxTokens;
+  const raw = $('pRaw').value.trim();
+  if (raw) {
+    let obj;
+    try { obj = JSON.parse(raw); }
+    catch (e) { toast('Raw params: invalid JSON', true); throw e; }
+    if (obj && typeof obj === 'object') Object.assign(p, obj);  // raw wins
+  }
+  return p;
+}
+
+// ---- durable memory (localStorage; instruct chats only) ----
+const LS_CURRENT = 'localllm.current';
+const LS_SAVED = 'localllm.saved';
+
+function persistCurrent() {
+  if (!state.selected || state.selected.type !== 'instruct') return;
+  try {
+    localStorage.setItem(LS_CURRENT, JSON.stringify({
+      modelId: state.selected.id, label: state.selected.label,
+      messages: state.messages, ts: Date.now(),
+    }));
+  } catch (_) { /* quota / private mode — fail silently */ }
+}
+
+function restoreCurrent() {
+  let c;
+  try { c = JSON.parse(localStorage.getItem(LS_CURRENT) || 'null'); } catch (_) { return; }
+  if (!c || !c.messages || !c.messages.length) return;
+  const m = (state.catalog.instruct || []).find(x => x.id === c.modelId);
+  if (!m) return;  // model left the registry
+  state.selected = m; state.backend = m.backends[0]; state.messages = c.messages;
+  renderList(); renderControls(); openChat(true);
+  toast('Restored last session — launch the model to continue');
+}
+
+function loadSaved() { try { return JSON.parse(localStorage.getItem(LS_SAVED) || '[]'); } catch (_) { return []; } }
+function writeSaved(list) { try { localStorage.setItem(LS_SAVED, JSON.stringify(list)); } catch (_) {} }
+
+function saveConversation() {
+  if (!state.selected || state.selected.type !== 'instruct' || !state.messages.length) {
+    toast('Nothing to save', true); return;
+  }
+  const name = prompt('Save conversation as:',
+    `${state.selected.label} — ${new Date().toLocaleString()}`);
+  if (!name) return;
+  const list = loadSaved();
+  list.unshift({ id: 'c' + Date.now(), name, modelId: state.selected.id,
+                 label: state.selected.label, messages: state.messages.slice(), ts: Date.now() });
+  writeSaved(list);
+  toast('Saved');
+  renderHistory();
+}
+
+function renderHistory() {
+  const list = loadSaved();
+  if (!list.length) {
+    $('histList').innerHTML = '<div class="convo-empty">No saved conversations yet. Hit Save to keep one.</div>';
+    return;
+  }
+  $('histList').innerHTML = list.map(c =>
+    `<div class="convo-row">
+       <span class="cname" data-load="${c.id}">${escapeHtml(c.name)}</span>
+       <span class="cmeta">${escapeHtml(c.label)} · ${c.messages.length} msgs</span>
+       <button class="del" data-del="${c.id}" title="Delete">✕</button>
+     </div>`).join('');
+  $('histList').querySelectorAll('[data-load]').forEach(el =>
+    el.onclick = () => loadConversation(el.dataset.load));
+  $('histList').querySelectorAll('[data-del]').forEach(el =>
+    el.onclick = () => deleteConversation(el.dataset.del));
+}
+
+function loadConversation(id) {
+  const c = loadSaved().find(x => x.id === id);
+  if (!c) return;
+  const m = (state.catalog.instruct || []).find(x => x.id === c.modelId);
+  if (!m) { toast('That model is no longer in the registry', true); return; }
+  state.selected = m; state.backend = m.backends[0]; state.messages = c.messages.slice();
+  renderList(); renderControls(); openChat(true);
+  persistCurrent();
+  $('histPanel').classList.remove('show'); $('histBtn').classList.remove('on');
+  toast(`Loaded "${c.name}" — launch the model to continue`);
+}
+
+function deleteConversation(id) {
+  writeSaved(loadSaved().filter(x => x.id !== id));
+  renderHistory();
+}
+
+// ---- panel toggles ----
+function togglePanel(panelId, btnId, otherPanelId, otherBtnId) {
+  const show = !$(panelId).classList.contains('show');
+  $(panelId).classList.toggle('show', show);
+  $(btnId).classList.toggle('on', show);
+  $(otherPanelId).classList.remove('show');
+  $(otherBtnId).classList.remove('on');
+  if (panelId === 'histPanel' && show) renderHistory();
+}
+$('paramsBtn').onclick = () => togglePanel('paramsPanel', 'paramsBtn', 'histPanel', 'histBtn');
+$('histBtn').onclick = () => togglePanel('histPanel', 'histBtn', 'paramsPanel', 'paramsBtn');
+$('saveBtn').onclick = saveConversation;
+$('pReset').onclick = () => {
+  ['pTemp', 'pTopP', 'pTopK', 'pMaxTokens', 'pSeed', 'pRaw'].forEach(id => $(id).value = '');
+  toast('Params reset to server defaults');
+};
+
+// ---- boot ----
+loadModels().then(restoreCurrent);
+pollStatus();
+setInterval(pollStatus, 4000);
+</script>
+</body>
+</html>

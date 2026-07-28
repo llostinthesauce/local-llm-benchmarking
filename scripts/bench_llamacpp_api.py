@@ -23,7 +23,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psutil
 import requests
 from urllib.parse import urlparse
 
@@ -41,16 +40,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from prompts import PASSES, build_prompt_for_pass, context_budget_for_pass
+import memutil
 
 
 class MemSampler:
     def __init__(self):
-        self.peak = psutil.virtual_memory().percent
+        self.peak = memutil.virtual_memory().percent
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._loop, daemon=True)
     def _loop(self):
         while not self._stop.is_set():
-            self.peak = max(self.peak, psutil.virtual_memory().percent)
+            self.peak = max(self.peak, memutil.virtual_memory().percent)
             time.sleep(0.1)
     def start(self): self._t.start()
     def stop(self) -> float:
@@ -72,7 +72,7 @@ def run_benchmark(model_id: str, passes: list[dict], output_dir: Path,
                   temperature: float = 0.7, top_p: float = 0.8,
                   quant: str = "?", cooldown: int = DEFAULT_COOLDOWN,
                   mem_guard: float = 80.0, dry_run: bool = False,
-                  mtp: bool = False) -> Path:
+                  mtp: bool = False, top_k: int = 20) -> Path:
     run_id = str(uuid.uuid4())[:8]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_csv = output_dir / f"llamacpp_api_{model_id}_{ts}.csv"
@@ -97,7 +97,7 @@ def run_benchmark(model_id: str, passes: list[dict], output_dir: Path,
             print(f"  [DRY RUN] {p['id']}: ctx={ctx_used}{target} gen={p['gen_tokens']}")
             continue
 
-        mem_pct = psutil.virtual_memory().percent
+        mem_pct = memutil.virtual_memory().percent
         if mem_pct >= mem_guard:
             _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
                 "model_name": model_id, "backend": "LLAMACPP_API", "pass_name": p["id"],
@@ -112,7 +112,7 @@ def run_benchmark(model_id: str, passes: list[dict], output_dir: Path,
         system_msg = "" if family == "gemma4" else "You are a helpful coding assistant."
         payload = {"model": model_id, "messages": [{"role": "system", "content": system_msg},
             {"role": "user", "content": prompt_text}], "max_tokens": p["gen_tokens"],
-            "temperature": temperature, "top_p": top_p, "stream": True,
+            "temperature": temperature, "top_p": top_p, "top_k": top_k, "stream": True,
             "stream_options": {"include_usage": True}}
         request_timeout = max(600, min(3600, int(ctx_used / 100) + int(p["gen_tokens"] / 2)))
 
@@ -244,6 +244,7 @@ def main() -> None:
     ap.add_argument("--family", type=str, default="?", help="Model family (gemma4, qwen3, etc.)")
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.8)
+    ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--quant", type=str, default="?", help="Quant label for CSV")
     ap.add_argument("--mtp", action="store_true", help="Mark run as using MTP speculative decoding")
     ap.add_argument("--dry-run", action="store_true")
@@ -253,7 +254,7 @@ def main() -> None:
     run_benchmark(args.model, selected_passes, args.output_dir, args.url,
                   args.ctx_cap, args.family, args.temperature, args.top_p,
                   args.quant, args.cooldown, args.mem_guard, args.dry_run,
-                  args.mtp)
+                  args.mtp, top_k=args.top_k)
 
 
 if __name__ == "__main__":

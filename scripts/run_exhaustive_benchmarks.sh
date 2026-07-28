@@ -229,6 +229,7 @@ for row in model_registry.iter_models(model_registry.DEFAULT_CONFIG):
         str(row.get("mtp_supported", False)),
         row.get("draft_model") or "-",
         row.get("architecture", "dense"),
+        row.get("mlx_server") or "-",
     ]
     print("\t".join(fields))
 PY
@@ -262,56 +263,78 @@ run_step "llamacpp_raw_all" \
 
 log ""
 log "=== llama.cpp API: each existing GGUF row via llama-server ==="
-while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture; do
+log "    MTP-capable models run twice (mtp=off baseline, then mtp=on)."
+while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture mlx_server; do
     [[ "$backend" == "llamacpp" ]] || continue
-    MTP_ARGS=()
+
+    # MTP-capable models get an off/on sweep; everything else runs once (off).
+    MTP_MODES=("off")
     if [[ "$mtp_supported" == "True" || "$mtp_supported" == "true" ]]; then
-        MTP_ARGS=(--mtp)
+        MTP_MODES=("off" "on")
     fi
 
-    log "Starting llama-server for $family_id $quant"
-    SERVER_LOG="$RUN_DIR/server_${family_id}_${quant}.log"
-    if [[ "$DRY_RUN" == "1" ]]; then
-        log "DRY RUN start server: bash scripts/serve_local.sh $path --backend llamacpp --host 127.0.0.1"
-        run_step "llamacpp_api_${family_id}_${quant}" \
-            "$PYTHON" scripts/bench_llamacpp_api.py \
-                --model "$name" \
-                --passes "${PASSES[@]}" \
-                --ctx-cap "$ctx_cap" \
-                --quant "$quant" \
-                --output-dir "$RUN_DIR/llamacpp_api" \
-                --cooldown "$COOLDOWN" \
-                --mem-guard "$MEM_GUARD" \
-                ${MTP_ARGS:+"${MTP_ARGS[@]}"}
-        continue
-    fi
+    for mtp_mode in "${MTP_MODES[@]}"; do
+        SERVE_MTP_ARGS=()
+        BENCH_MTP_ARGS=()
+        if [[ "$mtp_mode" == "on" ]]; then
+            BENCH_MTP_ARGS=(--mtp)
+        elif [[ "$mtp_supported" == "True" || "$mtp_supported" == "true" ]]; then
+            SERVE_MTP_ARGS=(--no-mtp)   # force the baseline off for a capable model
+        fi
+        STEP="llamacpp_api_${family_id}_${quant}_mtp${mtp_mode}"
+        SERVER_LOG="$RUN_DIR/server_${family_id}_${quant}_mtp${mtp_mode}.log"
 
-    bash scripts/serve_local.sh "$path" --backend llamacpp --host 127.0.0.1 >"$SERVER_LOG" 2>&1 &
-    SERVER_PID=$!
+        log "Starting llama-server for $family_id $quant (mtp=$mtp_mode)"
+        if [[ "$DRY_RUN" == "1" ]]; then
+            log "DRY RUN start server: bash scripts/serve_local.sh $path --backend llamacpp --host 127.0.0.1 ${SERVE_MTP_ARGS[*]:-}"
+            run_step "$STEP" \
+                "$PYTHON" scripts/bench_llamacpp_api.py \
+                    --model "$name" \
+                    --passes "${PASSES[@]}" \
+                    --ctx-cap "$ctx_cap" \
+                    --quant "$quant" \
+                    --output-dir "$RUN_DIR/llamacpp_api" \
+                    --cooldown "$COOLDOWN" \
+                    --mem-guard "$MEM_GUARD" \
+                    ${BENCH_MTP_ARGS:+"${BENCH_MTP_ARGS[@]}"}
+            continue
+        fi
 
-    if wait_for_health "http://127.0.0.1:8080/v1/models" "llama-server $family_id"; then
-        run_step "llamacpp_api_${family_id}_${quant}" \
-            "$PYTHON" scripts/bench_llamacpp_api.py \
-                --model "$name" \
-                --passes "${PASSES[@]}" \
-                --ctx-cap "$ctx_cap" \
-                --quant "$quant" \
-                --output-dir "$RUN_DIR/llamacpp_api" \
-                --cooldown "$COOLDOWN" \
-                --mem-guard "$MEM_GUARD" \
-                ${MTP_ARGS:+"${MTP_ARGS[@]}"}
-    else
-        log "SKIP llama.cpp API for $family_id $quant; server did not become healthy"
-    fi
+        bash scripts/serve_local.sh "$path" --backend llamacpp --host 127.0.0.1 \
+            ${SERVE_MTP_ARGS:+"${SERVE_MTP_ARGS[@]}"} >"$SERVER_LOG" 2>&1 &
+        SERVER_PID=$!
 
-    cleanup_server
-    sleep 5
+        if wait_for_health "http://127.0.0.1:8080/v1/models" "llama-server $family_id (mtp=$mtp_mode)"; then
+            run_step "$STEP" \
+                "$PYTHON" scripts/bench_llamacpp_api.py \
+                    --model "$name" \
+                    --passes "${PASSES[@]}" \
+                    --ctx-cap "$ctx_cap" \
+                    --quant "$quant" \
+                    --output-dir "$RUN_DIR/llamacpp_api" \
+                    --cooldown "$COOLDOWN" \
+                    --mem-guard "$MEM_GUARD" \
+                    ${BENCH_MTP_ARGS:+"${BENCH_MTP_ARGS[@]}"}
+        else
+            log "SKIP llama.cpp API for $family_id $quant (mtp=$mtp_mode); server did not become healthy"
+        fi
+
+        cleanup_server
+        sleep 5
+    done
 done < "$REGISTRY_TSV"
 
 log ""
 log "=== MLX Direct: all MLX rows ==="
-while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture; do
+while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture mlx_server; do
     [[ "$backend" == "mlx" ]] || continue
+    # bench_mlx_direct.py loads in-process via mlx_lm, which cannot load gemma4_unified
+    # (12B) or the elastic E4B checkpoint. Those are pinned to mlx_vlm and covered by
+    # the MLX API path below; skip them here instead of hanging/erroring.
+    if [[ "$mlx_server" == "mlx_vlm" ]]; then
+        log "SKIP mlx_direct for $family_id $quant: mlx_vlm-only model (mlx_lm cannot load it); covered by MLX API path"
+        continue
+    fi
     DRAFT_ARGS=()
     if [[ -n "${draft_model:-}" && "${draft_model:-}" != "-" ]]; then
         DRAFT_ARGS=(--draft-model "$draft_model")
@@ -336,10 +359,17 @@ done < "$REGISTRY_TSV"
 
 log ""
 log "=== MLX API: all MLX rows ==="
-while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture; do
+while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported draft_model architecture mlx_server; do
     [[ "$backend" == "mlx" ]] || continue
+    # Route gemma4_unified (12B) and elastic E4B to mlx_vlm.server; mlx_lm cannot
+    # serve them (hangs / fails to load). Pin lives in models.local.json mlx_server.
+    SERVER_ARGS=()
     DRAFT_ARGS=()
-    if [[ -n "${draft_model:-}" && "${draft_model:-}" != "-" ]]; then
+    if [[ "$mlx_server" == "mlx_vlm" ]]; then
+        SERVER_ARGS=(--server mlx_vlm)
+        log "Routing mlx_api $family_id $quant to mlx_vlm.server (registry pin)"
+    elif [[ -n "${draft_model:-}" && "${draft_model:-}" != "-" ]]; then
+        # mlx_vlm has no --draft-model; only attach a draft head on the mlx_lm path.
         DRAFT_ARGS=(--draft-model "$draft_model")
     fi
     run_step "mlx_api_${family_id}_${quant}" \
@@ -351,6 +381,7 @@ while IFS=$'\t' read -r backend family_id path ctx_cap quant name mtp_supported 
             --output-dir "$RUN_DIR/mlx_api" \
             --cooldown "$COOLDOWN" \
             --mem-guard "$MEM_GUARD" \
+            ${SERVER_ARGS:+"${SERVER_ARGS[@]}"} \
             ${DRAFT_ARGS:+"${DRAFT_ARGS[@]}"}
 done < "$REGISTRY_TSV"
 

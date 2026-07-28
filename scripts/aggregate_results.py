@@ -125,12 +125,118 @@ def _iter_csv_rows(run_dir: Path) -> Iterable[tuple[Path, Dict[str, str]]]:
             continue
 
 
+def _is_quality_row(row: Dict[str, str]) -> bool:
+    """Quality CSVs carry per-case accuracy, not per-pass throughput.
+
+    They share the run/model/backend columns so the two can be joined, but they
+    have no gen_tps or ctx_used and must not be fed through _normalize().
+    """
+    return "eval_name" in row and "score" in row
+
+
+def _quality_summary(rows: List[Dict[str, str]], lookup: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse per-case rows into one record per (model, backend, eval)."""
+    grouped: Dict[tuple, List[Dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        model_name = row.get("model_name") or "?"
+        match = _registry_match({"model_name": model_name}, lookup)
+        family_id = match["family_id"] if match else _clean_model_key(model_name)
+        key = (family_id, row.get("backend") or "?", row.get("quant") or "?", row.get("eval_name") or "?")
+        grouped[key].append(row)
+
+    out: List[Dict[str, Any]] = []
+    for (family_id, backend, quant, eval_name), group in sorted(grouped.items()):
+        scored = [r for r in group if (r.get("status") or "") == "ok"]
+        errors = len(group) - len(scored)
+        mean = _score_mean([_float(r.get("score")) for r in scored])
+        strict = _score_mean([_float(r.get("passed")) for r in scored])
+        out.append({
+            "family_id": family_id,
+            "backend": backend,
+            "quant": quant,
+            "eval_name": eval_name,
+            "metric": (scored[0].get("metric") if scored else "") or "accuracy",
+            "cases": len(group),
+            "errors": errors,
+            "mean_score": round(mean, 4),
+            "strict_pass_rate": round(strict, 4),
+            "model_name": group[0].get("model_name", ""),
+        })
+    return out
+
+
+def _combined_leaderboard(variants: List[Dict[str, Any]],
+                          quality: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Join throughput against accuracy on (family_id, quant).
+
+    This is the join the whole suite exists for. Tokens per second is a
+    production number only if the weights still answer correctly, and a quant
+    that scores well is irrelevant if it runs at 4 tok/s. Neither table alone
+    supports a serving decision; side by side they do.
+
+    Backend is deliberately not part of the key: accuracy is a property of the
+    weights, so a family's eval scores apply to whichever engine served it
+    fastest.
+    """
+    by_variant: Dict[tuple, Dict[str, Any]] = {}
+    for variant in variants:
+        if variant.get("ok_passes", 0) <= 0:
+            continue
+        key = (variant["family_id"], variant.get("quant", "?"))
+        current = by_variant.get(key)
+        if current is None or variant.get("gen_tps_mean", 0) > current.get("gen_tps_mean", 0):
+            by_variant[key] = variant
+
+    by_quality: Dict[tuple, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    for record in quality:
+        by_quality[(record["family_id"], record["quant"])][record["eval_name"]] = record
+
+    rows: List[Dict[str, Any]] = []
+    for key in sorted(set(by_variant) | set(by_quality)):
+        family_id, quant = key
+        variant = by_variant.get(key)
+        evals = by_quality.get(key, {})
+        rows.append({
+            "family_id": family_id,
+            "quant": quant,
+            "backend": variant["backend"] if variant else "",
+            "gen_tps_mean": round(variant["gen_tps_mean"], 2) if variant else None,
+            "ttft_s_mean": round(variant["ttft_s_mean"], 3) if variant else None,
+            "token_trust": variant.get("token_trust") if variant else None,
+            "evals": {name: record["mean_score"] for name, record in sorted(evals.items())},
+            "eval_mean": round(_score_mean([r["mean_score"] for r in evals.values()]), 4) if evals else None,
+            "has_speed": variant is not None,
+            "has_quality": bool(evals),
+        })
+    rows.sort(key=lambda r: (-(r["eval_mean"] or 0), -(r["gen_tps_mean"] or 0)))
+    return rows
+
+
+def _mtp_label(row: Dict[str, str]) -> str:
+    """Normalize the serving-config dimension across schemas.
+
+    bench_*.py records mtp=on|off. config_compare records config=mtp_on|mtp_off
+    (or kv_fp16|kv_q8 for the KV suite — passed through so KV variants stay distinct).
+    """
+    mtp = (row.get("mtp") or "").strip().lower()
+    if mtp in ("on", "off"):
+        return mtp
+    config = (row.get("config") or "").strip().lower()
+    if config == "mtp_on":
+        return "on"
+    if config == "mtp_off":
+        return "off"
+    if config:
+        return config
+    return "off"
+
+
 def _normalize(path: Path, row: Dict[str, str], lookup: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     backend = row.get("backend") or path.parent.name.upper()
     model_name = row.get("model_name") or row.get("model") or path.stem
     match = _registry_match({"model_name": model_name}, lookup)
     family_id = match["family_id"] if match else _clean_model_key(model_name)
-    pass_name = row.get("pass_name") or row.get("test_name") or path.parent.name
+    pass_name = row.get("pass_name") or row.get("test_name") or row.get("prompt_id") or path.parent.name
     status = row.get("status") or "unknown"
     gen_tps = _float(row.get("gen_tps"))
     if not gen_tps:
@@ -160,22 +266,41 @@ def _normalize(path: Path, row: Dict[str, str], lookup: Dict[str, Dict[str, Any]
         "ok": status.startswith("ok") or "clamped_ctx_" in status,
         "quant": row.get("quant") or (match.get("quant") if match else "?"),
         "concurrency": _int(row.get("concurrency") or row.get("parallel"), 1),
-        "mtp": row.get("mtp", "off"),
+        "mtp": _mtp_label(row),
         "draft_tokens": _int(row.get("draft_tokens")),
         "draft_accepted_tokens": _int(row.get("draft_accepted_tokens")),
-        "draft_accept_rate": _float(row.get("draft_accept_rate")),
+        # config_compare stores the ratio in draft_accept; bench_*.py in draft_accept_rate
+        "draft_accept_rate": _float(row.get("draft_accept_rate") or row.get("draft_accept")),
+        "recall_pass": row.get("recall_pass", ""),
         "artifact": row.get("artifact", ""),
         "token_count_method": row.get("token_count_method", ""),
     }
 
 
 def _mean(values: Iterable[float]) -> float:
+    """Mean of positive values only.
+
+    Correct for throughput: a 0 t/s reading means the pass never produced a
+    measurement, and averaging it in would understate the model. Do NOT use this
+    for accuracy — see _score_mean.
+    """
     vals = [v for v in values if v > 0]
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def _variant_key(row: Dict[str, Any]) -> tuple[str, str, str, str]:
-    return (row["family_id"], row["backend"], row["quant"], row["model_name"])
+def _score_mean(values: Iterable[float]) -> float:
+    """Plain arithmetic mean, zeros included.
+
+    Eval scores are the opposite case from throughput: a 0.0 means the model got
+    the answer wrong, which is a result, not a missing measurement. Dropping
+    zeros here would report a model that failed half its cases as scoring 1.0.
+    """
+    vals = list(values)
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _variant_key(row: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (row["family_id"], row["backend"], row["quant"], row["model_name"], row["mtp"])
 
 
 def _score(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -228,6 +353,8 @@ def _score(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "backend": rows[0]["backend"],
         "kind": rows[0]["kind"],
         "quant": rows[0]["quant"],
+        "mtp": rows[0]["mtp"],
+        "avg_draft_accept_rate": round(_mean([r["draft_accept_rate"] for r in ok_rows]), 3),
         "ok_passes": len(ok_rows),
         "total_passes": len(rows),
         "total_rows": len(rows),
@@ -275,8 +402,10 @@ def _best(items: List[Dict[str, Any]], *, kind: str | None = None,
 
 def aggregate(run_dir: Path, config: Path) -> Dict[str, Any]:
     lookup = _registry_lookup(config)
-    rows = [_normalize(path, row, lookup) for path, row in _iter_csv_rows(run_dir)]
-    grouped: Dict[tuple[str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    raw_rows = list(_iter_csv_rows(run_dir))
+    quality_raw = [row for _, row in raw_rows if _is_quality_row(row)]
+    rows = [_normalize(path, row, lookup) for path, row in raw_rows if not _is_quality_row(row)]
+    grouped: Dict[tuple[str, str, str, str, str], List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[_variant_key(row)].append(row)
     variants = [_score(v) for v in grouped.values()]
@@ -316,6 +445,15 @@ def aggregate(run_dir: Path, config: Path) -> Dict[str, Any]:
             "best_api_trusted": _best(variants, kind="api", family_id=family, trusted_only=True),
         })
 
+    mtp_deltas = _mtp_deltas(variants)
+    quality = _quality_summary(quality_raw, lookup)
+    combined = _combined_leaderboard(variants, quality)
+
+    if quality and not variants:
+        warnings.append("Quality results found with no speed results; the combined leaderboard has no throughput column")
+    if variants and not quality:
+        warnings.append("No quality results in this run — throughput alone cannot show whether a quant is still correct (see scripts/bench_quality.py)")
+
     return {
         "metadata": {
             "generated_at": datetime.now().isoformat(),
@@ -323,6 +461,7 @@ def aggregate(run_dir: Path, config: Path) -> Dict[str, Any]:
             "config": str(config),
             "row_count": len(rows),
             "variant_count": len(variants),
+            "quality_row_count": len(quality_raw),
             "token_trust_cutoff": APPROXIMATE_THRESHOLD,
         },
         "warnings": warnings,
@@ -333,9 +472,37 @@ def aggregate(run_dir: Path, config: Path) -> Dict[str, Any]:
             "trusted_api_overall": best_api_trusted,
             "by_family": family_recs,
         },
+        "mtp_deltas": mtp_deltas,
+        "quality": quality,
+        "combined_leaderboard": combined,
         "variants": variants,
         "rows": rows,
     }
+
+
+def _mtp_deltas(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pair mtp=on vs mtp=off variants (same family/backend/quant) and report the speedup."""
+    by_base: Dict[tuple[str, str, str], Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    for v in variants:
+        if v["mtp"] in ("on", "off"):
+            by_base[(v["family_id"], v["backend"], v["quant"])][v["mtp"]] = v
+    deltas = []
+    for (family_id, backend, quant), pair in sorted(by_base.items()):
+        off, on = pair.get("off"), pair.get("on")
+        if not off or not on:
+            continue
+        off_tps, on_tps = off["avg_gen_tps"], on["avg_gen_tps"]
+        pct = round((on_tps / off_tps - 1) * 100, 1) if off_tps else 0.0
+        deltas.append({
+            "family_id": family_id,
+            "backend": backend,
+            "quant": quant,
+            "off_avg_gen_tps": off_tps,
+            "on_avg_gen_tps": on_tps,
+            "delta_pct": pct,
+            "avg_draft_accept_rate": on.get("avg_draft_accept_rate", 0.0),
+        })
+    return deltas
 
 
 def _fmt_num(value: Any, decimals: int = 2) -> str:
@@ -369,6 +536,50 @@ def write_markdown(payload: Dict[str, Any], out_path: Path) -> None:
         lines += ["## Warnings", ""]
         for w in warnings:
             lines.append(f"- **WARNING:** {w}")
+        lines.append("")
+
+    combined = payload.get("combined_leaderboard") or []
+    if combined:
+        eval_names = sorted({name for row in combined for name in row["evals"]})
+        lines += [
+            "## Speed x Accuracy",
+            "",
+            "Throughput is only a serving argument when the weights still answer",
+            "correctly. Sorted by mean eval score, then by throughput.",
+            "",
+            "| Model | Quant | Backend | gen t/s | TTFT s | "
+            + " | ".join(eval_names)
+            + " | Eval mean |",
+            "|---|---|---|---:|---:|" + "---:|" * (len(eval_names) + 1),
+        ]
+        for row in combined:
+            scores = " | ".join(
+                _fmt_num(row["evals"].get(name), 3) if name in row["evals"] else "—"
+                for name in eval_names
+            )
+            lines.append(
+                f"| {row['family_id']} | {row['quant']} | {row['backend'] or '—'} "
+                f"| {_fmt_num(row['gen_tps_mean'], 2) if row['gen_tps_mean'] is not None else '—'} "
+                f"| {_fmt_num(row['ttft_s_mean'], 3) if row['ttft_s_mean'] is not None else '—'} "
+                f"| {scores} | {_fmt_num(row['eval_mean'], 3) if row['eval_mean'] is not None else '—'} |"
+            )
+        lines.append("")
+
+    quality = payload.get("quality") or []
+    if quality:
+        lines += [
+            "## Quality Evals",
+            "",
+            "| Model | Quant | Backend | Eval | Metric | Cases | Errors | Mean | Strict pass |",
+            "|---|---|---|---|---|---:|---:|---:|---:|",
+        ]
+        for record in quality:
+            lines.append(
+                f"| {record['family_id']} | {record['quant']} | {record['backend']} "
+                f"| {record['eval_name']} | {record['metric']} | {record['cases']} "
+                f"| {record['errors']} | {_fmt_num(record['mean_score'], 3)} "
+                f"| {_fmt_num(record['strict_pass_rate'], 3)} |"
+            )
         lines.append("")
 
     lines += [
@@ -408,23 +619,40 @@ def write_markdown(payload: Dict[str, Any], out_path: Path) -> None:
         trusted_label = _variant_label(family.get("best_api_trusted"))
         lines.append(f"| `{family['family_id']}` | {raw_label} | {api_label} | {trusted_label} |")
 
+    mtp_deltas = payload.get("mtp_deltas", [])
+    if mtp_deltas:
+        lines += [
+            "",
+            "## MTP Speedup (on vs off)",
+            "",
+            "| Family | Backend | Quant | Off TPS | On TPS | Δ | Draft Accept |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+        for d in mtp_deltas:
+            lines.append(
+                f"| `{d['family_id']}` | {d['backend']} | {d['quant']} "
+                f"| {_fmt_num(d['off_avg_gen_tps'])} | {_fmt_num(d['on_avg_gen_tps'])} "
+                f"| {d['delta_pct']:+.1f}% | {_fmt_num(d['avg_draft_accept_rate'], 3)} |"
+            )
+
     lines += [
         "",
         "## Variant Leaderboard",
         "",
-        "| Kind | Trust | Family | Backend | Model | Quant | OK | Avg TPS | Micro | Normal | High | Max | Max Ctx | TTFT | Peak Mem | Token Rank | Dup | Status |",
-        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| Kind | Trust | Family | Backend | Model | Quant | MTP | OK | Avg TPS | Micro | Normal | High | Max | Draft | Max Ctx | TTFT | Peak Mem | Token Rank | Dup | Status |",
+        "|---|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     ]
     for item in sorted(payload["variants"], key=lambda x: (x["kind"], -x["score"], x["family_id"])):
         status = ", ".join(item["statuses"]) or "-"
-        count = ", ".join(item.get("token_count_methods", [])) or "-"
         trust = item.get("token_trust", "?")
         dup = str(item.get("duplicate_pass_count", 0))
         lines.append(
             f"| {item['kind']} | {trust} | `{item['family_id']}` | {item['backend']} | `{item['model_name']}` | {item['quant']} "
+            f"| {item.get('mtp', 'off')} "
             f"| {item['ok_passes']}/{item['total_passes']} | {_fmt_num(item['avg_gen_tps'])} "
             f"| {_fmt_num(item['micro_gen_tps'])} | {_fmt_num(item['normal_gen_tps'])} "
             f"| {_fmt_num(item['high_gen_tps'])} | {_fmt_num(item['max_gen_tps'])} "
+            f"| {_fmt_num(item.get('avg_draft_accept_rate'), 3)} "
             f"| {item['max_ctx_used']} | {_fmt_num(item['avg_ttft_s'], 3)} "
             f"| {_fmt_num(item['peak_mem_pct'], 1)} | {item['worst_token_rank']}/{item['best_token_rank']} | {dup} | {status} |"
         )
@@ -433,12 +661,34 @@ def write_markdown(payload: Dict[str, Any], out_path: Path) -> None:
     out_path.write_text("\n".join(lines))
 
 
+# Flat normalized long-format CSV: one row per measurement, fixed schema.
+# This is the no-cruft artifact for downstream parsing — no per-backend column drift.
+NORMALIZED_FIELDS = [
+    "timestamp", "family_id", "model_name", "backend", "kind", "quant", "mtp",
+    "pass_name", "ctx_used", "prompt_tps", "gen_tps", "ttft_s",
+    "draft_accept_rate", "recall_pass", "peak_mem_pct", "status", "source",
+]
+
+
+def write_normalized_csv(payload: Dict[str, Any], out_path: Path) -> None:
+    with open(out_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=NORMALIZED_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for row in sorted(
+            payload["rows"],
+            key=lambda r: (r["family_id"], r["backend"], r["quant"], r["mtp"],
+                           r["pass_order"], r["timestamp"]),
+        ):
+            w.writerow({k: row.get(k, "") for k in NORMALIZED_FIELDS})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate benchmark run results")
     parser.add_argument("run_dir", type=Path, help="Run directory containing benchmark CSVs")
     parser.add_argument("--config", type=Path, default=model_registry.DEFAULT_CONFIG)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-md", type=Path)
+    parser.add_argument("--output-csv", type=Path)
     args = parser.parse_args()
 
     if not args.run_dir.exists():
@@ -446,10 +696,13 @@ def main() -> None:
     payload = aggregate(args.run_dir, args.config)
     out_json = args.output_json or args.run_dir / "summary.json"
     out_md = args.output_md or args.run_dir / "summary.md"
+    out_csv = args.output_csv or args.run_dir / "results.csv"
     out_json.write_text(json.dumps(payload, indent=2, sort_keys=True))
     write_markdown(payload, out_md)
+    write_normalized_csv(payload, out_csv)
     print(f"Wrote {out_md}")
     print(f"Wrote {out_json}")
+    print(f"Wrote {out_csv}")
 
 
 if __name__ == "__main__":

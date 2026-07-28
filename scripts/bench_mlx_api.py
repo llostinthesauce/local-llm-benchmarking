@@ -46,17 +46,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 from prompts import PASSES, build_prompt_for_pass, context_budget_for_pass
+import memutil
 
 
 class MemSampler:
     def __init__(self, pids: list[int] | None = None):
-        self.peak = psutil.virtual_memory().percent
+        self.peak = memutil.virtual_memory().percent
         self._stop = threading.Event()
         self._pids = pids or []
         self._t = threading.Thread(target=self._loop, daemon=True)
     def _loop(self):
         while not self._stop.is_set():
-            mem = psutil.virtual_memory().percent
+            mem = memutil.virtual_memory().percent
             for pid in self._pids:
                 try: mem = max(mem, psutil.Process(pid).memory_percent())
                 except psutil.NoSuchProcess: pass
@@ -122,7 +123,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                   port: int = DEFAULT_PORT, decode_concurrency: int = 1,
                   quant: str = "?", cooldown: int = DEFAULT_COOLDOWN,
                    mem_guard: float = 80.0, dry_run: bool = False,
-                  server: str = "mlx_lm") -> Path:
+                  server: str = "mlx_lm", top_k: int = 20) -> Path:
     model_repo = os.path.expanduser(model_repo)
     model_name = model_repo.split("/")[-1]
     full_model_id = model_repo  # mlx server expects full repo path
@@ -144,7 +145,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
         for i, p in enumerate(passes):
             ctx_used = context_budget_for_pass(p, ctx_cap)
             prompt_text, target_prompt_tokens = build_prompt_for_pass(p, ctx_used)
-            mem_pct = psutil.virtual_memory().percent
+            mem_pct = memutil.virtual_memory().percent
             if mem_pct >= mem_guard:
                 _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
                     "model_name": model_name, "backend": backend_label, "pass_name": p["id"],
@@ -163,7 +164,7 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
             payload = {"model": full_model_id,
                        "messages": [{"role": "user", "content": prompt_text}],
                        "max_tokens": p["gen_tokens"], "temperature": temperature,
-                       "top_p": top_p, "stream": True,
+                       "top_p": top_p, "top_k": top_k, "stream": True,
                        "stream_options": {"include_usage": True}}
             request_timeout = max(600, min(3600, int(ctx_used / 100) + int(p["gen_tokens"] / 2)))
 
@@ -268,6 +269,7 @@ def main() -> None:
     ap.add_argument("--ctx-cap", type=int, default=131072)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.8)
+    ap.add_argument("--top-k", type=int, default=20)
     ap.add_argument("--quant", type=str, default="?", help="Quant label for CSV")
     ap.add_argument("--server", choices=["mlx_lm", "mlx_vlm"], default="mlx_lm",
                     help="Server backend: mlx_lm (text) or mlx_vlm (vision/omni)")
@@ -278,7 +280,7 @@ def main() -> None:
     run_benchmark(args.model, selected_passes, args.output_dir,
                   args.draft_model, args.ctx_cap, args.temperature, args.top_p,
                   args.port, args.decode_concurrency, args.quant, args.cooldown,
-                  args.mem_guard, args.dry_run, args.server)
+                  args.mem_guard, args.dry_run, args.server, top_k=args.top_k)
 
 
 if __name__ == "__main__":

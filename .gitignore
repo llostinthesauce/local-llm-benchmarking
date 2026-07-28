@@ -1,23 +1,46 @@
+# --- Python / tooling ---
 .venv/
-.DS_Store
-.claude/
-.remember/
 __pycache__/
 *.pyc
-archive/
+.pytest_cache/
+.DS_Store
+__MACOSX/
+
+# --- Editor / agent state ---
+.claude/
+.remember/
 .playwright-mcp/
 .antigravitycli/
-tools/
 
-# Generated artifacts
+# --- Generated artifacts ---
 configs/opencode_llamacpp_provider.generated.json
 configs/models.local.json
 
-# macOS zip junk
-__MACOSX/
+# --- Machine-specific docs (contain local paths) ---
+LOCAL_MODELS.md
 
-# Results — local only, never commit
+# --- Results: local only, never commit ---
 results/
 
-# Environment secrets — use .env.example as template
+# --- Environment secrets: use .env.example as template ---
 .env
+
+# --- Model checkouts and convenience symlinks -------------------------------
+# A tracked symlink publishes its target string, which is an absolute local
+# path. Keep them out of git; smoke_test.py fails the build if one is staged.
+test_model
+models/
+*.gguf
+*.safetensors
+
+# --- Local-only scratch directories ---
+tools/
+archive/
+playground/
+
+# Ad-hoc scratch probe against a running server. Named test_* so pytest would
+# collect it and fire a live HTTP request during test runs — keep it local.
+test_prompt.py
+
+# Corbin GPT — large, private, never public (personal writing + AI exports)
+corbin-gpt/

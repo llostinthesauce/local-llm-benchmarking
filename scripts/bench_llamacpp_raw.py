@@ -24,8 +24,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 FIELDS = [
     "timestamp", "run_id", "model_name", "backend", "pass_name",
     "ctx_cap", "ctx_used", "prompt_tokens", "gen_tokens",
@@ -42,10 +40,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import model_registry
 from prompts import PASSES
+import memutil
 
 
 def _safe_model_cap_ctx(model_size_gb: float, ctx_cap: int, mem_guard_pct: float = 80.0, architecture: str = "dense") -> int:
-    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    total_gb = memutil.virtual_memory().total / (1024 ** 3)
     avail_gb = total_gb * (mem_guard_pct / 100.0) - model_size_gb - 2.0
     if avail_gb <= 0:
         return 0
@@ -59,12 +58,12 @@ def _safe_model_cap_ctx(model_size_gb: float, ctx_cap: int, mem_guard_pct: float
 
 class MemSampler:
     def __init__(self):
-        self.peak = psutil.virtual_memory().percent
+        self.peak = memutil.virtual_memory().percent
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._loop, daemon=True)
     def _loop(self):
         while not self._stop.is_set():
-            self.peak = max(self.peak, psutil.virtual_memory().percent)
+            self.peak = max(self.peak, memutil.virtual_memory().percent)
             time.sleep(0.1)
     def start(self): self._t.start()
     def stop(self) -> float:
@@ -100,7 +99,7 @@ def run_benchmark(model_path: str, passes: list[dict], output_dir: Path,
                 _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
                     "model_name": model_name, "backend": "LLAMACPP_RAW", "pass_name": p["id"],
                     "ctx_cap": ctx_cap, "ctx_used": 0, "prompt_tokens": 0, "gen_tokens": 0,
-                    "prompt_tps": 0.0, "gen_tps": 0.0, "peak_mem_pct": round(psutil.virtual_memory().percent, 1),
+                    "prompt_tps": 0.0, "gen_tps": 0.0, "peak_mem_pct": round(memutil.virtual_memory().percent, 1),
                     "status": "skipped_kv_oom", "quant": quant, "concurrency": 1, "mtp": "off",
                     "draft_tokens": 0, "draft_accepted_tokens": 0, "draft_accept_rate": 0.0, "token_count_method": "none"}, out_csv)
                 continue
@@ -115,7 +114,7 @@ def run_benchmark(model_path: str, passes: list[dict], output_dir: Path,
             print(f"  [DRY RUN] {p['id']}: ctx={ctx_used} gen={p['gen_tokens']}")
             continue
 
-        mem_pct = psutil.virtual_memory().percent
+        mem_pct = memutil.virtual_memory().percent
         if mem_pct >= mem_guard:
             _csv_append({"timestamp": datetime.now().isoformat(), "run_id": run_id,
                 "model_name": model_name, "backend": "LLAMACPP_RAW", "pass_name": p["id"],

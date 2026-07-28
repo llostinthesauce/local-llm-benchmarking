@@ -33,18 +33,27 @@ LEGACY_ALIASES = {
     "gemma-26b": "gemma4_26b_moe",
     "gemma31": "gemma4_31b_dense",
     "gemma-31b": "gemma4_31b_dense",
-    "gemma12": "gemma4_12b_dense",
-    "gemma-12b": "gemma4_12b_dense",
-    "gemma4-12b": "gemma4_12b_dense",
-    "gemma4_12b": "gemma4_12b_dense",
     "gemmae4b": "gemma4_e4b_dense",
     "gemma-e4b": "gemma4_e4b_dense",
     "gemma4e4b": "gemma4_e4b_dense",
     "gemma4-e4b": "gemma4_e4b_dense",
+    "gemma12": "gemma4_12b_dense",
+    "gemma-12b": "gemma4_12b_dense",
+    "gemma4-12b": "gemma4_12b_dense",
+    "gemma4_12b": "gemma4_12b_dense",
+    "gemma12-8bit": "gemma4_12b_8bit",
+    "gemma12-8b": "gemma4_12b_8bit",
+    "gemma4-12b-8bit": "gemma4_12b_8bit",
     "qwen35-uncensored": "qwen3_35b_moe_uncensored",
     "qwen35uncensored": "qwen3_35b_moe_uncensored",
     "qwen35-nvfp4": "qwen3_35b_moe_nvfp4",
     "qwen35nvfp4": "qwen3_35b_moe_nvfp4",
+    "laguna": "laguna_xs_33b_moe",
+    "laguna-xs": "laguna_xs_33b_moe",
+    "lagunaxs": "laguna_xs_33b_moe",
+    "north": "north_mini_code_30b_moe",
+    "north-mini": "north_mini_code_30b_moe",
+    "northmini": "north_mini_code_30b_moe",
 }
 
 
@@ -68,10 +77,11 @@ FORBIDDEN_TEMPLATES = frozenset({"chatml"})
 
 
 def _chat_template(family: str) -> str:
-    if family == "gemma4":
-        return "gemma2"
-    if family == "qwen3":
-        return ""
+    # Empty = do NOT force a template; let llama.cpp use the GGUF's embedded one.
+    # The gemma-4-26B QAT GGUF carries its own <|turn>/<|channel> thinking-format
+    # template; forcing --chat-template gemma2 mangles the prompt and the model
+    # collapses into garbage (verified: forced gemma2 → "9b 9b 9b…"; embedded →
+    # "Two plus two equals four."). Same hazard as forcing chatml on Qwen.
     return ""
 
 
@@ -110,6 +120,7 @@ def iter_models(config: Path) -> list[dict[str, Any]]:
         base = {
             "family_id": family_id,
             "family": family_name,
+            "use_case": family.get("use_case", ""),
             "architecture": family.get("architecture", "dense"),
             "ctx_cap": int(family.get("ctx_cap", 131072)),
             "temperature": family.get("temperature", 0.7),
@@ -132,6 +143,7 @@ def iter_models(config: Path) -> list[dict[str, Any]]:
                 "exists": Path(path).exists(),
                 "note": entry.get("_note", ""),
                 "mtp_supported": entry.get("mtp_supported", False),
+                "draft_model": _expand(entry.get("draft_model", "")),
                 "server_binary": _expand(entry.get("server_binary", "")),
                 "mmproj_path": _expand(entry.get("mmproj_path", "")),
                 "spec_type": entry.get("spec_type", ""),
@@ -185,6 +197,7 @@ def _print_shell(model: dict[str, Any]) -> None:
         "name",
         "family",
         "family_id",
+        "use_case",
         "ctx_cap",
         "quant",
         "chat_template",
@@ -193,6 +206,7 @@ def _print_shell(model: dict[str, Any]) -> None:
         "top_k",
         "mlx_server",
         "mtp_supported",
+        "draft_model",
         "server_binary",
         "mmproj_path",
         "spec_type",
@@ -211,6 +225,8 @@ def cmd_list(args: argparse.Namespace) -> None:
             f"{model['backend']:<9} {model['family_id']:<18} "
             f"{model['quant']:<8} {exists:<7} {aliases:<32} {model['path']}"
         )
+        if model.get("use_case"):
+            print(f"{'':<9} → {model['use_case']}")
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:

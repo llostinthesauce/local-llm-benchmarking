@@ -52,6 +52,13 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from prompts import PASSES as ALL_PASSES
 import model_registry
+import memutil
+
+# Quality evals live outside scripts/, so the repo root has to be importable too.
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from evals.registry import EVALS as EVAL_SPECS
 
 DEFAULT_COOLDOWN = 120
 DEFAULT_MEM_GUARD = 80.0
@@ -124,6 +131,7 @@ def _discover_models(config_path: Path) -> list[dict[str, Any]]:
                     "family_id": row.get("family_id", "?"),
                     "quant": row.get("quant", "?"),
                     "architecture": row.get("architecture", "dense"),
+                    "mlx_server": row.get("mlx_server", ""),
                     "label": f"[MLX {row.get('quant', '?')}] {row.get('family_id', '?')} ({p.name})",
                 }
             )
@@ -165,7 +173,51 @@ def _start_llama_server(model_path: str, expected_model: str) -> subprocess.Pope
     return None
 
 
-def _kill_server(proc: subprocess.Popen | None) -> None:
+def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 180) -> bool:
+    """Block until `port` answers /v1/models, or the child dies."""
+    for _ in range(timeout_s):
+        if proc.poll() is not None:
+            return False
+        try:
+            if requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=2).status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _serve_for_eval(model: dict[str, Any]) -> tuple[subprocess.Popen | None, int, str]:
+    """Launch the canonical server for a model and return (proc, port, model_id).
+
+    Everything goes through serve_local.sh so the eval phase serves models
+    exactly the way the rest of the repo does — same engine routing, same
+    offline guards, same registry-pinned mlx_vlm decisions.
+    """
+    serve_script = Path(__file__).parent / "scripts" / "serve_local.sh"
+    if model["kind"] == "gguf":
+        selector, backend, port = model["path"], "llamacpp", 8080
+        model_id = model["name"]
+    else:
+        selector, backend, port = model["mlx_repo"], "mlx", 8085
+        # mlx_vlm.server requires the exact filesystem path as the model id;
+        # mlx_lm.server accepts it too, so the path is correct for both.
+        model_id = model["mlx_repo"]
+
+    proc = subprocess.Popen(
+        ["bash", str(serve_script), selector, "--backend", backend, "--host", "127.0.0.1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if not _wait_for_port(port, proc):
+        stderr_tail = proc.stderr.read().decode(errors="replace")[-400:] if proc.stderr else ""
+        console.print(f"  [red]server for {model['name']} never came up: {stderr_tail}[/red]")
+        _kill_server(proc, port)
+        return None, port, model_id
+    return proc, port, model_id
+
+
+def _kill_server(proc: subprocess.Popen | None, port: int = 8080) -> None:
     if proc and proc.poll() is None:
         proc.terminate()
         try:
@@ -176,14 +228,14 @@ def _kill_server(proc: subprocess.Popen | None) -> None:
     for _ in range(20):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.5)
-            if sock.connect_ex(("127.0.0.1", 8080)) != 0:
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
                 return
         time.sleep(0.5)
-    console.print("  [yellow]Warning: port 8080 is still occupied after stopping llama-server.[/yellow]")
+    console.print(f"  [yellow]Warning: port {port} is still occupied after stopping the server.[/yellow]")
 
 
 def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = False) -> None:
-    mem_gb = psutil.virtual_memory().total / (1024**3)
+    mem_gb = memutil.virtual_memory().total / (1024**3)
     cpu = platform.processor() or platform.machine()
     console.print("\n\n")
     console.print(
@@ -207,6 +259,9 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
         "sel_api": [],
         "sel_mlx": [],
         "sel_passes": [],
+        "sel_evals": [],
+        "eval_fetch": False,
+        "eval_exec": False,
         "cooldown_s": DEFAULT_COOLDOWN,
         "mem_guard": DEFAULT_MEM_GUARD,
         "dry_run": False,
@@ -229,12 +284,16 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
     def _fmt_passes() -> str:
         return ", ".join(p["id"] for p in state["sel_passes"]) if state["sel_passes"] else "none"
 
+    def _fmt_evals() -> str:
+        return ", ".join(state["sel_evals"]) if state["sel_evals"] else "none"
+
     nav_choices = [
         questionary.Choice("1. Backends - which engines to use", value="backends"),
         questionary.Choice("2. Models & Quants - which variants", value="models"),
         questionary.Choice("3. Passes - what test sizes", value="passes"),
-        questionary.Choice("4. Settings - cooldown, memory, dry-run", value="settings"),
-        questionary.Choice("5. Summary -> RUN", value="run"),
+        questionary.Choice("4. Quality evals - accuracy, not just speed", value="quality"),
+        questionary.Choice("5. Settings - cooldown, memory, dry-run", value="settings"),
+        questionary.Choice("6. Summary -> RUN", value="run"),
         questionary.Choice("Exit", value="exit"),
     ]
 
@@ -295,6 +354,38 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
             state["sel_passes"] = _abort(questionary.checkbox("Passes:", choices=choices).ask()) or []
             console.print(f"  [green]Passes: {_fmt_passes()}[/green]")
 
+        elif page == "quality":
+            choices = []
+            for name, spec in sorted(EVAL_SPECS.items(), key=lambda kv: (kv[1].tier, kv[0])):
+                gate = " [needs --fetch]" if spec.tier == 2 else ""
+                if spec.needs_code_execution:
+                    gate += " [executes model code]"
+                choices.append(
+                    questionary.Choice(
+                        f"[tier {spec.tier}] {name} - {spec.description}{gate}",
+                        value=name,
+                        checked=name in state["sel_evals"],
+                    )
+                )
+            state["sel_evals"] = _abort(questionary.checkbox("Quality evals:", choices=choices).ask()) or []
+
+            selected = [EVAL_SPECS[name] for name in state["sel_evals"]]
+            if any(spec.tier == 2 for spec in selected):
+                state["eval_fetch"] = questionary.confirm(
+                    "Tier-2 evals need a one-time dataset download. Allow it?",
+                    default=state["eval_fetch"],
+                ).ask() or False
+            if any(spec.needs_code_execution for spec in selected):
+                console.print(
+                    "  [yellow]HumanEval scores by running code the model writes. "
+                    "Mitigations are best-effort (subprocess, rlimits, timeout) and are "
+                    "not a security boundary.[/yellow]"
+                )
+                state["eval_exec"] = questionary.confirm(
+                    "Allow executing model-generated code?", default=False
+                ).ask() or False
+            console.print(f"  [green]Evals: {_fmt_evals()}[/green]")
+
         elif page == "settings":
             state["cooldown_s"] = int(
                 _abort(
@@ -323,7 +414,8 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
         elif page == "run":
             total_models = len(state["sel_gguf"]) + len(state["sel_api"]) + len(state["sel_mlx"])
             total_runs = total_models * len(state["sel_passes"])
-            if total_runs == 0:
+            eval_runs = total_models * len(state["sel_evals"])
+            if total_runs == 0 and eval_runs == 0:
                 console.print("[yellow]Nothing selected to run.[/yellow]")
                 continue
 
@@ -333,9 +425,13 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
             table.add_row("Backends", _fmt_backends())
             table.add_row("Models", _fmt_models())
             table.add_row("Passes", _fmt_passes())
+            table.add_row("Quality evals", _fmt_evals())
             table.add_row("Cooldown", f"{state['cooldown_s']}s")
             table.add_row("Mem guard", f"{state['mem_guard']:.0f}%")
+            table.add_row("Dry run", "[bold yellow]Yes[/bold yellow]" if state["dry_run"] else "No")
             table.add_row("Total runs", str(total_runs))
+            if eval_runs:
+                table.add_row("Eval runs", f"{eval_runs} (model x eval)")
             console.print(table)
 
             if not (_abort(questionary.confirm("Proceed?", default=True).ask()) or False):
@@ -392,6 +488,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                             family=model.get("family", "?"),
                             temperature=model.get("temperature", 0.7),
                             top_p=model.get("top_p", 0.8),
+                            top_k=model.get("top_k", 20),
                             quant=model.get("quant", "?"),
                             cooldown=state["cooldown_s"],
                             mem_guard=state["mem_guard"],
@@ -418,6 +515,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                         ctx_cap=model["ctx_cap"],
                         temperature=model.get("temperature", 0.7),
                         top_p=model.get("top_p", 0.8),
+                        top_k=model.get("top_k", 20),
                         quant=model.get("quant", "?"),
                         cooldown=state["cooldown_s"],
                         mem_guard=state["mem_guard"],
@@ -436,6 +534,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                 for i, model in enumerate(state["sel_mlx"]):
                     repo = model["mlx_repo"]
                     console.print(f"\n [bold][{i + 1}/{len(state['sel_mlx'])}] {repo}[/bold]")
+                    server_type = "mlx_vlm" if model.get("mlx_server") == "mlx_vlm" else "mlx_lm"
                     csv_path = run_mlx_api(
                         repo,
                         state["sel_passes"],
@@ -443,9 +542,11 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                         ctx_cap=model["ctx_cap"],
                         temperature=model.get("temperature", 0.7),
                         top_p=model.get("top_p", 0.8),
+                        top_k=model.get("top_k", 20),
                         quant=model.get("quant", "?"),
                         cooldown=state["cooldown_s"],
                         mem_guard=state["mem_guard"],
+                        server=server_type,
                     )
                     console.print(f" [green]CSV -> {csv_path}[/green]")
                     if i < len(state["sel_mlx"]) - 1:
@@ -466,6 +567,7 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                         ctx_cap=model["ctx_cap"],
                         temperature=model.get("temperature", 0.7),
                         top_p=model.get("top_p", 0.8),
+                        top_k=model.get("top_k", 20),
                         quant=model.get("quant", "?"),
                         cooldown=state["cooldown_s"],
                         mem_guard=state["mem_guard"],
@@ -473,6 +575,46 @@ def run_tui(results_dir: Path, config_v2: Path, preselect_model_cap: bool = Fals
                     )
                     console.print(f" [green]CSV -> {csv_path}[/green]")
                     if i < len(state["sel_mlx"]) - 1:
+                        _cooldown(state["cooldown_s"])
+
+            if state["sel_evals"]:
+                from scripts.bench_quality import run_suite
+
+                out_dir = results_dir / "quality"
+                console.print("\n[bold green]=== Quality evals ===[/bold green]")
+                # De-duplicate: a GGUF selected for both raw and server backends
+                # is still one set of weights, and its accuracy does not depend
+                # on which speed harness measured it.
+                targets: list[dict[str, Any]] = []
+                seen_paths: set[str] = set()
+                for model in state["sel_gguf"] + state["sel_api"] + state["sel_mlx"]:
+                    key = model.get("path") or model.get("mlx_repo", "")
+                    if key and key not in seen_paths:
+                        seen_paths.add(key)
+                        targets.append(model)
+
+                for i, model in enumerate(targets):
+                    console.print(f"\n [bold][{i + 1}/{len(targets)}] {model['name']}[/bold]")
+                    server, port, model_id = _serve_for_eval(model)
+                    if not server:
+                        console.print(f" [red]Skipping evals for {model['name']} — no server.[/red]")
+                        continue
+                    try:
+                        csv_path = run_suite(
+                            model=model_id,
+                            eval_names=state["sel_evals"],
+                            output_dir=out_dir,
+                            api_base=f"http://127.0.0.1:{port}/v1",
+                            backend="llamacpp_api" if model["kind"] == "gguf" else "mlx_api",
+                            quant=model.get("quant", "?"),
+                            ctx_cap=model["ctx_cap"],
+                            allow_fetch=bool(state["eval_fetch"]),
+                            allow_code_execution=bool(state["eval_exec"]),
+                        )
+                        console.print(f" [green]CSV -> {csv_path}[/green]")
+                    finally:
+                        _kill_server(server, port)
+                    if i < len(targets) - 1:
                         _cooldown(state["cooldown_s"])
 
             console.print("\n[bold green]All done.[/bold green]")

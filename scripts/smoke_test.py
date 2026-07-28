@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import py_compile
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +44,41 @@ def active_files(pattern: str):
         yield path
 
 
+def _git(*args: str) -> list[str]:
+    """Run a git command in ROOT, returning stdout lines. Empty list if git is unavailable."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line for line in out.splitlines() if line]
+
+
+def tracked_files() -> list[Path]:
+    """Files git actually publishes. This — not a hand-maintained denylist — is
+    the definition of 'public', so hygiene checks cannot drift out of date when
+    a new private directory is added."""
+    return [ROOT / rel for rel in _git("ls-files")]
+
+
+def untracked_unignored_files() -> list[Path]:
+    """Files that are neither tracked nor ignored: one `git add -A` from being public."""
+    return [ROOT / rel for rel in _git("ls-files", "--others", "--exclude-standard")]
+
+
+def repo_python_files() -> list[Path]:
+    """This project's own .py files — tracked plus not-yet-committed, but never
+    the git-ignored personal directories that happen to sit in the working tree."""
+    candidates = tracked_files() + untracked_unignored_files()
+    if not candidates:
+        candidates = list(active_files("*.py"))
+    return sorted(
+        {p for p in candidates if p.suffix == ".py" and p.is_file() and "__pycache__" not in str(p)}
+    )
+
+
 def check_scripts_exist() -> None:
     print("\n--- Referenced scripts exist ---")
     referenced = set()
@@ -49,9 +86,7 @@ def check_scripts_exist() -> None:
         text = sh_file.read_text()
         for m in re.finditer(r'scripts/([\w_]+\.(?:py|sh))', text):
             referenced.add(m.group(1))
-    for py_file in active_files("*.py"):
-        if "__pycache__" in str(py_file):
-            continue
+    for py_file in repo_python_files():
         text = py_file.read_text()
         for m in re.finditer(r'scripts/([\w_]+\.py)', text):
             referenced.add(m.group(1))
@@ -65,10 +100,7 @@ def check_scripts_exist() -> None:
 
 def check_python_compile() -> None:
     print("\n--- Python files compile ---")
-    for py_file in active_files("*.py"):
-        py_str = str(py_file)
-        if "__pycache__" in py_str:
-            continue
+    for py_file in repo_python_files():
         if py_file.name == "smoke_test.py":
             continue
         try:
@@ -140,7 +172,14 @@ def check_csv_columns() -> None:
         "draft_accept_rate", "token_count_method", "generated_text",
     ]
     expected_set = set(expected_fields)
+    # These are not pass-based throughput benches, so they carry their own CSV
+    # schemas on purpose: config_compare A/Bs one model across two server
+    # configs, head_to_head pits two models against each other, and quality
+    # records per-case accuracy rather than tokens/sec.
+    schema_exempt = {"bench_config_compare.py", "bench_head_to_head.py", "bench_quality.py"}
     for bench_file in sorted(SCRIPTS_DIR.glob("bench_*.py")):
+        if bench_file.name in schema_exempt:
+            continue
         text = bench_file.read_text()
         m = re.search(r'FIELDS\s*=\s*\[(.*?)\]', text, re.DOTALL)
         if not m:
@@ -191,15 +230,20 @@ def check_removed_backend_strings() -> None:
         (r'run_tool_eval', "tool eval reference"),
         (r'profile_mlx', "old MLX profiler reference"),
         (r'generate_opencode_config', "OpenCode generator reference"),
-        (r'Quality Eval', "cloud quality eval UI reference"),
+        # The removed feature was a cloud LLM-judge scorer. Match the identifiers
+        # it would reintroduce, not the word "judge" in prose — the evals/ suite
+        # documents at length that it deliberately has no judge, and a bare word
+        # ban would forbid saying so.
+        (r'(?i)judge[_-]?(?:model|prompt|score|client)', "LLM-judge scoring (replaced by the deterministic evals/ suite)"),
+        (r'(?i)(?:gemini|openai|anthropic)[_-]?judge', "cloud judge reference"),
+        (r'def\s+_?judge', "judge scoring function"),
         (r'--tool-eval', "tool eval orchestrator flag"),
         (r'"best_api_overall"', "deprecated best_api_overall key in recommendation dict"),
     ]
     found_any = False
     for pattern, label in dead_patterns:
-        for file in active_files("*.py"):
-            py_str = str(file)
-            if "__pycache__" in py_str or file.name == "smoke_test.py":
+        for file in repo_python_files():
+            if file.name == "smoke_test.py":
                 continue
             text = file.read_text()
             if re.search(pattern, text):
@@ -329,10 +373,20 @@ def check_tui_imports() -> None:
         ok("TUI imports bench_llamacpp_raw")
     else:
         fail("TUI does not import bench_llamacpp_raw")
-    if "Quality Eval" not in text and "do_quality" not in text:
-        ok("TUI is speed-only")
+    # The TUI used to be speed-only, with quality work living in a since-removed
+    # LLM-judge sidecar. The judge is gone for good; what replaced it is the
+    # deterministic evals/ suite, which the TUI drives through run_suite().
+    if "from scripts.bench_quality import run_suite" in text:
+        ok("TUI wires the quality eval suite")
     else:
-        fail("TUI still contains quality-eval UI")
+        fail("TUI does not import the quality eval suite")
+    # Same precision rule as check_removed_backend_strings: match identifiers a
+    # reintroduced judge would carry, not the word in a comment saying there
+    # isn't one.
+    if not re.search(r"(?i)judge[_-]?(?:model|prompt|score|client)", text):
+        ok("TUI has no LLM-judge scoring")
+    else:
+        fail("TUI reintroduced LLM-judge scoring")
     if "pkill" not in text:
         ok("No pkill in TUI")
     else:
@@ -351,32 +405,89 @@ def check_gitignore() -> None:
             fail(f".gitignore missing {check}")
 
 
+# Path fragments: a raw substring hit is always a real leak.
+LEAK_SUBSTRINGS = [
+    "/Users/",
+    "/home/",
+    "tools/llama.cpp-mtp",
+    ".lmstudio/models/",
+]
+
+# Machine and account identifiers. These must match on word boundaries — a bare
+# substring search flags "formatting" for containing the hostname "matti", which
+# is exactly the kind of false positive that trains people to ignore the check.
+LEAK_WORDS = [
+    "notOnGit",
+    "flados",
+    "matti",
+]
+
+# Docs legitimately show `~/.lmstudio/models` as the conventional model root.
+# `~`-prefixed references carry no username, so they are not a leak.
+LEAK_ALLOWED_SUBSTRINGS = ["~/.lmstudio/models"]
+
+SCANNABLE_SUFFIXES = {".py", ".sh", ".md", ".json", ".toml", ".txt", ".yml", ".yaml", ".html", ".css", ".js"}
+
+_WORD_PATTERNS = [(word, re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE)) for word in LEAK_WORDS]
+
+
+def _leaks_in(text: str) -> list[str]:
+    for allowed in LEAK_ALLOWED_SUBSTRINGS:
+        text = text.replace(allowed, "")
+    hits = [pattern for pattern in LEAK_SUBSTRINGS if pattern in text]
+    hits.extend(word for word, pattern in _WORD_PATTERNS if pattern.search(text))
+    return hits
+
+
 def check_public_path_hygiene() -> None:
     print("\n--- Public path hygiene ---")
-    patterns = [
-        "/Users/wayne",
-        "notOnGit",
-        "wayne@",
-        "flados",
-        "matti",
-        "tools/llama.cpp-mtp",
-        ".lmstudio/models/",
-    ]
+    files = tracked_files()
+    if not files:
+        ok("Skipped (not a git checkout) - hygiene is defined by what git tracks")
+        return
+
     found = False
-    for path in active_files("*"):
-        if path.is_dir() or path.name == "smoke_test.py":
+    for path in files:
+        if path.name == "smoke_test.py":
             continue
-        if path == CONFIG_DIR / "models.local.json":
+        # A tracked symlink publishes its target string, which is a local path.
+        if path.is_symlink():
+            fail(f"{path.relative_to(ROOT)}: tracked symlink leaks its target {os.readlink(path)!r}")
+            found = True
             continue
-        if path.suffix not in {".py", ".sh", ".md", ".json", ".toml", ".txt"}:
+        if not path.is_file() or path.suffix not in SCANNABLE_SUFFIXES:
             continue
-        text = path.read_text(errors="ignore")
-        for pattern in patterns:
-            if pattern in text:
-                fail(f"{path.relative_to(ROOT)}: contains local/development string {pattern!r}")
-                found = True
+        for pattern in _leaks_in(path.read_text(errors="ignore")):
+            fail(f"{path.relative_to(ROOT)}: contains local/development string {pattern!r}")
+            found = True
     if not found:
-        ok("No local/development paths found in public files")
+        ok(f"No local/development paths in {len(files)} git-tracked files")
+
+
+def check_untracked_not_ignored() -> None:
+    """Anything neither tracked nor ignored is one `git add -A` away from being
+    published without review. Fail on leaky content, warn on the rest."""
+    print("\n--- Untracked files are ignored or clean ---")
+    candidates = untracked_unignored_files()
+    if not candidates:
+        ok("No untracked, unignored files")
+        return
+
+    risky = []
+    for path in candidates:
+        if path.is_symlink():
+            risky.append((path, f"symlink to {os.readlink(path)}"))
+            continue
+        if not path.is_file() or path.suffix not in SCANNABLE_SUFFIXES:
+            continue
+        leaks = _leaks_in(path.read_text(errors="ignore"))
+        if leaks:
+            risky.append((path, f"contains {leaks[0]!r}"))
+
+    for path, why in risky:
+        fail(f"{path.relative_to(ROOT)}: untracked and not ignored - {why}")
+    if not risky:
+        ok(f"{len(candidates)} untracked file(s), none leak local paths")
 
 
 def main() -> None:
@@ -408,6 +519,7 @@ def main() -> None:
     check_tui_imports()
     check_gitignore()
     check_public_path_hygiene()
+    check_untracked_not_ignored()
 
     print()
     if EXIT == 0:

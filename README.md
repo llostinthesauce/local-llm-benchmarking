@@ -1,220 +1,205 @@
 # Local LLM Benchmarking
 
-Simple benchmark harness for comparing local inference backends on Apple Silicon.
+**A benchmark harness for locally-served LLMs that measures both how fast a model runs and whether it still gives correct answers.**
 
-The active suite has five backends:
+Built for Apple Silicon, but every benchmark talks plain OpenAI-compatible HTTP, so it works against llama.cpp, MLX, Ollama, vLLM, or anything else that serves `/v1/chat/completions`.
 
-| Backend | Engine | CSV tag |
-| --- | --- | --- |
-| llama.cpp raw | `llama-bench` | `LLAMACPP_RAW` |
-| llama.cpp server | `llama-server` OpenAI-compatible API | `LLAMACPP_API` |
-| MLX direct | `mlx_lm.stream_generate` | `MLX_DIRECT` |
-| MLX server | `mlx_lm.server` OpenAI-compatible API | `MLX_API` |
-| MLX-VLM server | `mlx_vlm.server` OpenAI-compatible API | `MLX_VLM_API` |
+```bash
+git clone https://github.com/llostinthesauce/local-llm-benchmarking
+cd local-llm-benchmarking
+pip install -r requirements.txt
+python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json
+python3 bench_tui.py
+```
 
-The TUI is the main entry point. Standalone scripts are kept for automation and debugging.
+---
 
-## Requirements
+## Why this exists
 
-- macOS on Apple Silicon
-- Python 3.9+
-- Python packages: `psutil`, `questionary`, `rich`, `requests`
-- llama.cpp tools on `PATH`: `llama-bench`, `llama-server`
-- Optional for MLX backends: `mlx`, `mlx-lm`
+Most local-LLM benchmarking stops at tokens per second. That number is easy to
+produce and it is genuinely useful — but on its own it cannot answer the question
+people actually have, which is *"should I serve this quant?"*
+
+A 3-bit quantization can be 40% faster than the 4-bit and still be the wrong
+choice, because somewhere in that compression it started dropping carries in
+arithmetic, ignoring "exactly three bullet points", or losing the middle of its
+own context window. **None of those failures change the throughput number.** They
+are invisible to every benchmark that only counts tokens.
+
+So this repo measures both, and joins them into one table. The shape of that
+report looks like this (**illustrative layout — not measured results; run it on
+your own hardware to get real numbers**):
+
+| Model | Quant | gen t/s | TTFT s | niah | ifeval | gsm8k | Eval mean |
+|---|---|---:|---:|---:|---:|---:|---:|
+| example_moe | Q4_K_XL | 59.3 | 1.84 | 1.000 | 0.917 | 0.884 | 0.934 |
+| example_moe | Q3_K_M | 71.4 | 1.52 | 0.733 | 0.833 | 0.712 | 0.759 |
+
+The second row is faster. It is also the one that quietly stopped retrieving from
+long context. That trade is a decision — but you can only make it if you measured
+both columns.
+
+## What's in the box
+
+**Four speed passes**, from a 1K-context smoke check to a run that fills the
+model's full advertised context window:
+
+| Pass | Context | Output | Intent |
+|---|---|---|---|
+| `micro` | 1K | 128 tok | Smoke check |
+| `normal` | 16K | 1K tok | Practical coding prompt |
+| `high` | 64K | 2K tok | Hard architecture prompt |
+| `max` | fills `ctx_cap` | 4K tok | Long-context stress |
+
+**Seven quality evals**, in two tiers. Every one is scored by code — no LLM
+judge, no API key, no rubric that can drift between runs.
+
+*Tier 1 generates its own data and runs fully offline:*
+
+| Eval | Measures | Catches |
+|---|---|---|
+| `niah` | Needle-in-a-haystack retrieval across the context window | A `ctx_cap` that is advertised but not real |
+| `ifeval_local` | Verifiable instruction following (IFEval method) | Constraint-following degrading before fluency does |
+| `determinism` | Byte-identical output across repeats at temp 0 | Non-deterministic kernels, KV-cache bugs, samplers that ignore temp=0 |
+
+*Tier 2 uses the standard public datasets, after an explicit `--fetch`:*
+
+| Eval | Dataset | Scoring |
+|---|---|---|
+| `gsm8k` | Grade-school math word problems | Exact match on the final number |
+| `humaneval` | 164 Python problems | pass@1 by running the reference tests |
+| `ifeval` | Google's 541-prompt IFEval set | Programmatic constraint verifiers |
+| `mmlu_pro` | Ten-option academic knowledge | Exact match on the chosen letter |
+
+Nothing downloads unless you ask. The serving scripts launch with
+`HF_HUB_OFFLINE=1` specifically so a benchmark can never silently pull weights
+mid-run and invalidate its own numbers.
+
+## Quickstart
+
+**Requirements:** macOS on Apple Silicon (for the MLX backends), Python 3.9+,
+`brew install llama.cpp` for GGUF, `pip install mlx mlx-lm mlx-vlm` for MLX.
 
 ```bash
 pip install -r requirements.txt
-```
 
-Install llama.cpp however you prefer. With Homebrew:
-
-```bash
-brew install llama.cpp
-```
-
-## Model Discovery
-
-Committed files do not contain local model paths.
-
-Create a local registry by pointing the scanner at the folders where your models live:
-
-```bash
-python3 scripts/discover_models.py --roots ~/.lmstudio/models ~/models --write configs/models.local.json
-```
-
-`configs/models.local.json` is ignored by git. It is the machine-specific registry used by the TUI, server launcher, and benchmark scripts.
-
-Check what was found:
-
-```bash
+# Point the registry at wherever your weights live:
+python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json
 python3 scripts/model_registry.py list
-python3 scripts/check_model_availability.py
+
+# Confirm the pipeline is sound before spending an hour on a run:
+python3 scripts/smoke_test.py
 ```
 
-The scanner recognizes known Qwen and Gemma families from `configs/model_catalog.json`. Unmatched GGUF files and MLX directories are still added as custom models with conservative defaults.
-
-## Run
-
-Interactive TUI:
+Then either drive it interactively:
 
 ```bash
 python3 bench_tui.py
 ```
 
-Dry-run the full orchestrator:
+or run the pieces directly:
 
 ```bash
-bash scripts/run_exhaustive_benchmarks.sh --dry-run
+# Serve a model (registry-driven; picks the right engine automatically)
+bash scripts/serve_local.sh qwen35 --backend llamacpp
+
+# Speed
+python3 scripts/bench_llamacpp_api.py --model qwen35 --passes micro normal
+
+# Quality — offline suite, nothing downloaded
+python3 scripts/bench_quality.py --model qwen35 --url http://127.0.0.1:8080/v1
+
+# Quality — add the public datasets (one-time download)
+python3 scripts/bench_quality.py --model qwen35 --evals tier1 tier2 --fetch
+
+# Join everything into one report
+python3 scripts/aggregate_results.py results/
 ```
 
-Run a small benchmark:
+There is also a unified CLI and a zero-dependency browser GUI:
 
 ```bash
-bash scripts/run_exhaustive_benchmarks.sh --execute --passes micro --allow-dirty
+python3 llm.py serve qwen35     # or: llm.py list / status / bench / smoke
+python3 llm.py web              # chat + model lifecycle at http://127.0.0.1:7860
 ```
 
-Run the full configured suite:
+## How it fits together
 
-```bash
-bash scripts/run_exhaustive_benchmarks.sh --execute --allow-dirty
+```
+                     configs/model_catalog.json     (public: match rules)
+                                 |
+                    scripts/discover_models.py      (scan disk)
+                                 |
+                     configs/models.local.json      (local: real paths, git-ignored)
+                                 |
+                    scripts/model_registry.py       (alias -> path + engine + sampling)
+                        /                 \
+        scripts/serve_local.sh          bench_tui.py / llm.py
+        (llama.cpp | mlx_lm | mlx_vlm)          |
+                        \                 /
+                    OpenAI-compatible HTTP endpoint
+                        /                 \
+            scripts/bench_*.py          scripts/bench_quality.py
+              (throughput)                 (evals/ suite)
+                        \                 /
+                  scripts/aggregate_results.py
+                        summary.md + summary.json
 ```
 
-Aggregate an existing run:
+The registry is the hinge. One alias (`qwen35`) resolves to a path, a context
+cap, sampling defaults, and the engine that can actually load it — and serving,
+benchmarking, and the GUI all read the same entry, so they cannot drift apart.
+
+## Adding a model
+
+Two files, and usually only one of them:
 
 ```bash
-python3 scripts/aggregate_results.py results/exhaustive_<timestamp>/
+# 1. Put the weights under your model root
+hf download poolside/Laguna-XS-2.1-GGUF --local-dir ~/.lmstudio/models/poolside/Laguna-XS-2.1-GGUF
+
+# 2. Re-scan
+python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json
 ```
 
-## Verify Setup
+Anything unrecognized is still registered as a `custom` family, so a new model
+is benchmarkable immediately. To give it a proper name, context cap, and sampling
+defaults, add a family to `configs/model_catalog.json`. Full walkthrough in
+**[docs/ADDING_MODELS.md](docs/ADDING_MODELS.md)**.
 
-Run these before a real benchmark or before publishing changes:
+## Safety notes
 
-```bash
-python3 scripts/smoke_test.py
-python3 scripts/discover_models.py --roots ~/.lmstudio/models ~/models --print
-python3 scripts/model_registry.py list
-bash scripts/run_exhaustive_benchmarks.sh --dry-run
-```
+- **`humaneval` executes code the model under test wrote.** That is inherent to
+  the benchmark. Mitigations (subprocess, rlimits, timeout, scratch dir, guard
+  prelude) stop *buggy* completions from doing damage; they are **not** a
+  security boundary against a deliberately malicious one. It is off by default
+  and needs `--allow-code-execution`. Evaluating an untrusted model belongs in a
+  VM or container.
+- **The web GUI is unauthenticated** and can start and stop model servers. It
+  binds `127.0.0.1` and refuses anything else without `--allow-remote`.
+- **No secrets, no personal paths.** `scripts/smoke_test.py` fails the build if a
+  git-tracked file contains a local path, and flags untracked files that would
+  leak one if committed.
 
-The smoke test compiles the Python files, checks the backend-to-runner wiring, validates CSV columns, and scans public files for local development paths.
+## Documentation
 
-To verify the server launch commands without starting a model:
+| Doc | What's in it |
+|---|---|
+| **[docs/ADDING_MODELS.md](docs/ADDING_MODELS.md)** | Registering new weights, catalog fields, engine routing |
+| **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** | What each eval measures, how it's scored, how to read the output |
+| **[docs/MODEL_NOTES.md](docs/MODEL_NOTES.md)** | Current model landscape and what's worth testing |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | Tests, conventions, adding an eval |
 
-```bash
-bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --dry-run
-bash scripts/serve_local.sh gemma26 --backend mlx --dry-run
-bash scripts/serve_local.sh gemma31 --backend mlx --dry-run
-bash scripts/serve_local.sh gemma12 --backend mlx-vlm --dry-run
-```
-
-Use aliases that exist in your generated `configs/models.local.json`.
-
-## Serve A Model
-
-Aliases come from `configs/models.local.json`.
-
-```bash
-bash scripts/serve_local.sh qwen35-uncensored --backend llamacpp --host 127.0.0.1
-bash scripts/serve_local.sh gemma26 --backend mlx --host 127.0.0.1
-bash scripts/serve_local.sh gemma31 --backend mlx --host 127.0.0.1
-bash scripts/serve_local.sh gemma12 --backend mlx-vlm --host 127.0.0.1
-```
-
-Both server launch paths bind to loopback by default.
-
-Every local MLX checkpoint here carries a `vision_config` — they are all
-vision-capable. By default `--backend mlx` serves them as **text** via `mlx_lm`
-(faster); `--backend mlx-vlm` loads the **vision tower** via `mlx_vlm`. Two of them
-cannot be loaded by the text engine at all and are auto-routed to `mlx_vlm` even
-under `--backend mlx`: `gemma12` (`model_type: gemma4_unified`) and `gemmae4b` (the
-E4B elastic weights). That routing comes from the `mlx_server` field in the registry,
-and needs `mlx-vlm >= 0.6.1`.
-
-You can also pass a direct model path:
+## Tests
 
 ```bash
-bash scripts/serve_local.sh /path/to/model.gguf --backend llamacpp
-bash scripts/serve_local.sh /path/to/mlx-model-dir --backend mlx
-```
-
-## Operating notes
-
-Conventions this repo assumes on the local machine:
-
-1. **All models live under `~/.lmstudio/models` (as `<org>/<repo>` subfolders).** The Hugging Face
-   hub cache (`~/.cache/huggingface/hub`) is intentionally left empty — an empty
-   cache is normal, not a broken setup.
-2. **Serving never downloads.** MLX servers launch with `HF_HUB_OFFLINE=1`, and
-   `serve_local.sh` refuses a `--model` that is not a local directory. To add a
-   model, place it under `~/.lmstudio/models` then regenerate the registry:
-   `python3 scripts/discover_models.py --roots ~/.lmstudio/models --write configs/models.local.json`.
-3. **All local MLX models are vision-capable.** `--backend mlx` = text (fast),
-   `--backend mlx-vlm` = vision tower. `gemma12` and `gemmae4b` only load under
-   `mlx_vlm`; they carry `"mlx_server": "mlx_vlm"` in the registry and are
-   auto-routed there even under `--backend mlx`. In `bench_tui.py`, benchmark those
-   two with the **MLX-VLM server** backend (MLX direct / MLX server will fail).
-4. **MLX servers switch models per request.** `mlx_lm.server` maps the special id
-   `default_model` to whatever was launched; `mlx_vlm.server` has no such mapping
-   and needs the exact loaded path. Any other model id triggers a load — which the
-   offline guard turns into a clean error instead of a download. For OpenAI-style
-   clients (e.g. opencode), address the `mlx_lm` fleet as `default_model`, and any
-   `mlx_vlm`-only model by its exact local path.
-
-## Passes
-
-| Pass | Intent |
-| --- | --- |
-| `micro` | Small prompt and short output for smoke checks |
-| `normal` | Practical coding prompt |
-| `high` | Hard architecture prompt with a 64K context budget and 2K output |
-| `max` | Long-context stress: fills near the model context cap and asks for 4K output |
-
-For text-generation backends, `max` builds deterministic synthetic context close to `ctx_cap - gen_tokens - margin`. The CSV `prompt_tokens` field is the proof that the backend actually consumed the long context.
-
-## Repository Hygiene
-
-Generated and local-only files are ignored:
-
-- `configs/models.local.json`
-- `results/`
-- `tools/`
-- `.venv/`
-- `.claude/`
-- `.remember/`
-- `archive/`
-- `__pycache__/`
-
-Run the static guardrail before publishing changes:
-
-```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest evals/ webgui/ -q
 python3 scripts/smoke_test.py
 ```
 
-## Layout
-
-```text
-.
-├── bench_tui.py
-├── configs/
-│   ├── model_catalog.json
-│   └── models.local.example.json
-├── scripts/
-│   ├── aggregate_results.py
-│   ├── bench_llamacpp_api.py
-│   ├── bench_llamacpp_raw.py
-│   ├── bench_mlx_api.py
-│   ├── bench_mlx_direct.py
-│   ├── check_model_availability.py
-│   ├── discover_models.py
-│   ├── llama_serve_menu.py
-│   ├── model_registry.py
-│   ├── prompts.py
-│   ├── run_exhaustive_benchmarks.sh
-│   ├── serve_local.sh
-│   ├── smoke_test.py
-│   └── stop_benchmarks.sh
-└── requirements.txt
-```
+The eval tests assert on scoring behaviour specifically — a benchmark whose
+grader is subtly wrong is worse than no benchmark, because it produces confident
+numbers.
 
 ## License
 
