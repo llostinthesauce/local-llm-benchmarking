@@ -52,6 +52,9 @@ FIELDS = [
 
 DEFAULT_EVALS = ["tier1"]
 
+# Consecutive request failures before an eval gives up on the server.
+MAX_CONSECUTIVE_FAILURES = 3
+
 
 def _model_slug(model: str) -> str:
     """Filename-safe short name.
@@ -147,11 +150,27 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
     print(f"\n  {spec.name} — {len(cases)} case(s) · {spec.description}")
     responses, texts = [], []
     started = time.perf_counter()
+    consecutive_failures = 0
+    aborted = ""
     for index, case in enumerate(cases, start=1):
         case_started = time.perf_counter()
         response = client.complete(case)
         responses.append(response)
         texts.append(response.text)
+
+        # Circuit breaker. A server that stops answering does not start again on
+        # its own, and every subsequent case costs a full per-request timeout —
+        # 25 long-context cases against a wedged llama-server is four hours of
+        # grinding that looks exactly like slow inference. Measured: llama-server
+        # at -c 262144 wedges on a 131K-token prompt and never recovers.
+        consecutive_failures = 0 if response.ok else consecutive_failures + 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            aborted = (
+                f"aborted after {consecutive_failures} consecutive failures "
+                f"({response.error[:80]}) — server is not answering"
+            )
+            print(f"    ABORT {spec.name}: {aborted}", flush=True)
+            break
         # Every case is reported, not a sample. A long-context eval can spend
         # minutes on a single prompt, and silence during it is indistinguishable
         # from a wedged server — which is exactly what it looked like the first
@@ -165,6 +184,9 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
         if verbose or state != "ok" or index == 1 or index % 5 == 0 or index == len(cases):
             print(f"    [{index}/{len(cases)}] {case.case_id} · {state} "
                   f"({time.perf_counter() - case_started:.1f}s)", flush=True)
+
+    # The breaker may have stopped short; score only what actually ran.
+    cases = cases[:len(responses)]
 
     # A response that never reached an answer is a harness problem, not a wrong
     # answer. Scoring it would blame the model for a token budget we chose.
@@ -205,6 +227,9 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
         "strict_pass_rate": round(strict, 4),
         "wall_s": round(time.perf_counter() - started, 1),
     }
+    if aborted:
+        summary["status"] = "aborted"
+        summary["aborted"] = aborted
     if truncated:
         summary["warning"] = (
             f"{truncated}/{len(cases)} responses hit max_tokens before emitting an "
@@ -216,8 +241,13 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
         summary["breakdown"] = summarizer(rows)
 
     note = f" · {truncated} truncated" if truncated else ""
+    # "0.000" would read as a failing score when in fact nothing was scorable.
+    figures = (
+        f"{spec.metric} {mean:.3f} · strict {strict:.3f}" if scored
+        else f"{spec.metric} n/a (nothing scorable)"
+    )
     print(
-        f"  → {spec.name}: {spec.metric} {mean:.3f} · strict {strict:.3f} "
+        f"  → {spec.name}: {figures} "
         f"· {len(scored)}/{len(cases)} scored · {errors} error(s){note} "
         f"· {summary['wall_s']}s"
     )

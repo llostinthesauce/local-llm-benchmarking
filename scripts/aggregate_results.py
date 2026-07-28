@@ -148,8 +148,12 @@ def _quality_summary(rows: List[Dict[str, str]], lookup: Dict[str, Dict[str, Any
     for (family_id, backend, quant, eval_name), group in sorted(grouped.items()):
         scored = [r for r in group if (r.get("status") or "") == "ok"]
         errors = len(group) - len(scored)
-        mean = _score_mean([_float(r.get("score")) for r in scored])
-        strict = _score_mean([_float(r.get("passed")) for r in scored])
+        # None, not 0.0, when nothing was scorable. An eval whose every response
+        # was truncated or errored has no score — recording it as zero would
+        # drag the model's combined mean down for a failure that was the
+        # harness's (a token budget) rather than the model's.
+        mean = round(_score_mean([_float(r.get("score")) for r in scored]), 4) if scored else None
+        strict = round(_score_mean([_float(r.get("passed")) for r in scored]), 4) if scored else None
         out.append({
             "family_id": family_id,
             "backend": backend,
@@ -157,9 +161,10 @@ def _quality_summary(rows: List[Dict[str, str]], lookup: Dict[str, Dict[str, Any
             "eval_name": eval_name,
             "metric": (scored[0].get("metric") if scored else "") or "accuracy",
             "cases": len(group),
+            "scored": len(scored),
             "errors": errors,
-            "mean_score": round(mean, 4),
-            "strict_pass_rate": round(strict, 4),
+            "mean_score": mean,
+            "strict_pass_rate": strict,
             "model_name": group[0].get("model_name", ""),
         })
     return out
@@ -184,7 +189,7 @@ def _combined_leaderboard(variants: List[Dict[str, Any]],
             continue
         key = (variant["family_id"], variant.get("quant", "?"))
         current = by_variant.get(key)
-        if current is None or variant.get("gen_tps_mean", 0) > current.get("gen_tps_mean", 0):
+        if current is None or variant.get("avg_gen_tps", 0) > current.get("avg_gen_tps", 0):
             by_variant[key] = variant
 
     by_quality: Dict[tuple, Dict[str, Dict[str, Any]]] = defaultdict(dict)
@@ -196,15 +201,17 @@ def _combined_leaderboard(variants: List[Dict[str, Any]],
         family_id, quant = key
         variant = by_variant.get(key)
         evals = by_quality.get(key, {})
+        scorable = [r["mean_score"] for r in evals.values() if r["mean_score"] is not None]
         rows.append({
             "family_id": family_id,
             "quant": quant,
             "backend": variant["backend"] if variant else "",
-            "gen_tps_mean": round(variant["gen_tps_mean"], 2) if variant else None,
-            "ttft_s_mean": round(variant["ttft_s_mean"], 3) if variant else None,
+            "gen_tps_mean": round(variant["avg_gen_tps"], 2) if variant else None,
+            "ttft_s_mean": round(variant["avg_ttft_s"], 3) if variant else None,
             "token_trust": variant.get("token_trust") if variant else None,
-            "evals": {name: record["mean_score"] for name, record in sorted(evals.items())},
-            "eval_mean": round(_score_mean([r["mean_score"] for r in evals.values()]), 4) if evals else None,
+            "evals": {name: record["mean_score"] for name, record in sorted(evals.items())
+                      if record["mean_score"] is not None},
+            "eval_mean": round(_score_mean(scorable), 4) if scorable else None,
             "has_speed": variant is not None,
             "has_quality": bool(evals),
         })
@@ -570,15 +577,20 @@ def write_markdown(payload: Dict[str, Any], out_path: Path) -> None:
         lines += [
             "## Quality Evals",
             "",
-            "| Model | Quant | Backend | Eval | Metric | Cases | Errors | Mean | Strict pass |",
+            "| Model | Quant | Backend | Eval | Metric | Scored | Unscorable | Mean | Strict pass |",
             "|---|---|---|---|---|---:|---:|---:|---:|",
         ]
         for record in quality:
+            mean = _fmt_num(record["mean_score"], 3) if record["mean_score"] is not None else "n/a"
+            strict = (
+                _fmt_num(record["strict_pass_rate"], 3)
+                if record["strict_pass_rate"] is not None else "n/a"
+            )
             lines.append(
                 f"| {record['family_id']} | {record['quant']} | {record['backend']} "
-                f"| {record['eval_name']} | {record['metric']} | {record['cases']} "
-                f"| {record['errors']} | {_fmt_num(record['mean_score'], 3)} "
-                f"| {_fmt_num(record['strict_pass_rate'], 3)} |"
+                f"| {record['eval_name']} | {record['metric']} "
+                f"| {record.get('scored', 0)}/{record['cases']} "
+                f"| {record['errors']} | {mean} | {strict} |"
             )
         lines.append("")
 
