@@ -330,6 +330,42 @@ def test_quality_summary_reports_strict_and_mean_separately():
     assert summary[0]["strict_pass_rate"] == 0.5
 
 
+def test_truncated_before_answer_detects_reasoning_exhaustion():
+    from evals.core import Response
+
+    # A thinking model asked for one letter with a tiny budget spends it all in
+    # reasoning_content and returns empty content with finish_reason=length.
+    # Scoring that as wrong would report 0% for a perfectly healthy model.
+    exhausted = Response(text="", finish_reason="length", completion_tokens=16,
+                         reasoning_chars=120)
+    assert exhausted.truncated_before_answer
+
+    # A real (if long) answer that hit the cap is a genuine response.
+    long_answer = Response(text="The answer is C", finish_reason="length")
+    assert not long_answer.truncated_before_answer
+
+    # A deliberate empty answer that stopped naturally is the model's choice.
+    empty_stop = Response(text="", finish_reason="stop")
+    assert not empty_stop.truncated_before_answer
+
+    # A transport failure is already an error, not a truncation.
+    failed = Response(text="", finish_reason="length", error="unreachable")
+    assert not failed.truncated_before_answer
+
+
+def test_truncated_rows_are_not_counted_as_wrong_answers():
+    agg = _aggregate_module()
+    rows = [
+        {"model_name": "m", "backend": "B", "quant": "q", "eval_name": "e",
+         "metric": "accuracy", "status": "ok", "score": "1.0", "passed": "1"},
+        {"model_name": "m", "backend": "B", "quant": "q", "eval_name": "e",
+         "metric": "accuracy", "status": "truncated_before_answer", "score": "0.0", "passed": "0"},
+    ]
+    summary = agg._quality_summary(rows, {})[0]
+    assert summary["mean_score"] == 1.0, "truncation must not drag the score down"
+    assert summary["errors"] == 1
+
+
 def test_quality_summary_excludes_errored_cases_from_scores():
     agg = _aggregate_module()
     rows = [

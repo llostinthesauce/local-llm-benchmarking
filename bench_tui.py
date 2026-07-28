@@ -173,17 +173,36 @@ def _start_llama_server(model_path: str, expected_model: str) -> subprocess.Pope
     return None
 
 
-def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 180) -> bool:
-    """Block until `port` answers /v1/models, or the child dies."""
-    for _ in range(timeout_s):
+def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 600) -> bool:
+    """Block until `port` can actually complete a request, or the child dies.
+
+    Deliberately not /v1/models. llama-server answers that with 200 while the
+    model is still loading and only then returns 503 "Loading model" from
+    /v1/chat/completions — so /v1/models reports ready before it is. A benchmark
+    that trusts it fires its first prompt into a server that has not finished
+    allocating its KV cache, and at a 262K context that wedges for minutes.
+    A one-token completion is the only probe that means the same thing on
+    llama.cpp, mlx_lm and mlx_vlm alike.
+    """
+    deadline = time.time() + timeout_s
+    payload = {
+        "model": "readiness-probe",
+        "messages": [{"role": "user", "content": "Reply with: OK"}],
+        "max_tokens": 4,
+        "temperature": 0.0,
+    }
+    while time.time() < deadline:
         if proc.poll() is not None:
             return False
         try:
-            if requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=2).status_code == 200:
+            response = requests.post(
+                f"http://127.0.0.1:{port}/v1/chat/completions", json=payload, timeout=30
+            )
+            if response.status_code == 200:
                 return True
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(2)
     return False
 
 

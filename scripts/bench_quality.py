@@ -86,7 +86,14 @@ def _case_row(case: Case, score: Score, response, eval_name: str, metric: str,
         "prompt_tokens": response.prompt_tokens,
         "completion_tokens": response.completion_tokens,
         "latency_s": round(response.latency_s, 3),
-        "status": "ok" if response.ok else response.error[:120],
+        # Truncation must not read as "ok" here: aggregate_results._quality_summary
+        # scores every ok row, so a reasoning model that never got to answer would
+        # be counted as answering wrongly.
+        "status": (
+            "truncated_before_answer" if response.truncated_before_answer
+            else "ok" if response.ok
+            else response.error[:120]
+        ),
         "context_len": case.meta.get("context_len", ""),
         "depth": case.meta.get("depth", ""),
         "group": case.meta.get("group", ""),
@@ -96,11 +103,32 @@ def _case_row(case: Case, score: Score, response, eval_name: str, metric: str,
     }
 
 
+def _scale_budget(cases: List[Case], scale: float) -> List[Case]:
+    """Multiply every case's max_tokens.
+
+    Reasoning models spend their budget in `reasoning_content` before writing a
+    single character of answer. Gemma 4 26B consumes 768 tokens thinking about a
+    three-bullet-list prompt and returns empty content — measured, not
+    hypothetical. Each eval's default is sized for a non-thinking model, so
+    thinking models need headroom rather than a different grader.
+    """
+    if scale == 1.0:
+        return cases
+    return [
+        Case(
+            case_id=c.case_id, prompt=c.prompt,
+            max_tokens=max(16, int(c.max_tokens * scale)),
+            temperature=c.temperature, top_p=c.top_p, system=c.system, meta=c.meta,
+        )
+        for c in cases
+    ]
+
+
 def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[str, Any],
-             dry_run: bool, verbose: bool) -> Dict[str, Any]:
+             dry_run: bool, verbose: bool, token_scale: float = 1.0) -> Dict[str, Any]:
     """Execute one eval end to end and return its summary block."""
     try:
-        cases = spec.build_cases(**build_kwargs)
+        cases = _scale_budget(spec.build_cases(**build_kwargs), token_scale)
     except FetchDisabled as exc:
         print(f"  SKIP {spec.name}: {exc}")
         return {"eval": spec.name, "status": "skipped_no_data", "cases": 0}
@@ -120,21 +148,37 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
     responses, texts = [], []
     started = time.perf_counter()
     for index, case in enumerate(cases, start=1):
+        case_started = time.perf_counter()
         response = client.complete(case)
         responses.append(response)
         texts.append(response.text)
-        if verbose or index % 25 == 0 or index == len(cases):
-            state = "ok" if response.ok else response.error[:60]
-            print(f"    [{index}/{len(cases)}] {case.case_id} · {state}")
+        # Every case is reported, not a sample. A long-context eval can spend
+        # minutes on a single prompt, and silence during it is indistinguishable
+        # from a wedged server — which is exactly what it looked like the first
+        # time this suite met a llama-server that was still loading.
+        if response.truncated_before_answer:
+            state = f"TRUNCATED (all {response.completion_tokens} tokens went to reasoning)"
+        elif response.ok:
+            state = "ok"
+        else:
+            state = response.error[:70]
+        if verbose or state != "ok" or index == 1 or index % 5 == 0 or index == len(cases):
+            print(f"    [{index}/{len(cases)}] {case.case_id} · {state} "
+                  f"({time.perf_counter() - case_started:.1f}s)", flush=True)
+
+    # A response that never reached an answer is a harness problem, not a wrong
+    # answer. Scoring it would blame the model for a token budget we chose.
+    usable = [not r.truncated_before_answer for r in responses]
 
     # Evals whose cases are only meaningful together (determinism) score in bulk.
     if spec.score_all is not None:
         scores = spec.score_all(cases, texts)
     else:
         scores = [
-            spec.score(case, text) if response.ok
-            else Score(value=0.0, passed=False, detail=response.error[:200])
-            for case, text, response in zip(cases, texts, responses)
+            spec.score(case, text) if (response.ok and ok_to_score)
+            else Score(value=0.0, passed=False,
+                       detail="truncated before answer" if response.ok else response.error[:200])
+            for case, text, response, ok_to_score in zip(cases, texts, responses, usable)
         ]
 
     rows = [
@@ -142,31 +186,43 @@ def run_eval(spec, client: EvalClient, base: Dict[str, Any], build_kwargs: Dict[
         for case, score, response in zip(cases, scores, responses)
     ]
 
-    scored = [s for s, r in zip(scores, responses) if r.ok]
+    scored = [s for s, r, u in zip(scores, responses, usable) if r.ok and u]
     mean = sum(s.value for s in scored) / len(scored) if scored else 0.0
     strict = sum(1 for s in scored if s.passed) / len(scored) if scored else 0.0
     errors = sum(1 for r in responses if not r.ok)
+    truncated = sum(1 for r in responses if r.truncated_before_answer)
 
     summary: Dict[str, Any] = {
         "eval": spec.name,
-        "status": "ok" if errors < len(responses) else "all_requests_failed",
+        "status": "ok" if scored else ("all_truncated" if truncated else "all_requests_failed"),
         "tier": spec.tier,
         "metric": spec.metric,
         "cases": len(cases),
+        "scored": len(scored),
         "errors": errors,
+        "truncated_before_answer": truncated,
         "mean_score": round(mean, 4),
         "strict_pass_rate": round(strict, 4),
         "wall_s": round(time.perf_counter() - started, 1),
     }
+    if truncated:
+        summary["warning"] = (
+            f"{truncated}/{len(cases)} responses hit max_tokens before emitting an "
+            f"answer (reasoning model). Excluded from the score — raise max_tokens."
+        )
 
     summarizer = SUMMARIZERS.get(spec.name)
     if summarizer is not None:
         summary["breakdown"] = summarizer(rows)
 
+    note = f" · {truncated} truncated" if truncated else ""
     print(
         f"  → {spec.name}: {spec.metric} {mean:.3f} · strict {strict:.3f} "
-        f"· {errors} error(s) · {summary['wall_s']}s"
+        f"· {len(scored)}/{len(cases)} scored · {errors} error(s){note} "
+        f"· {summary['wall_s']}s"
     )
+    if truncated:
+        print(f"     WARNING: {summary['warning']}")
     return {"summary": summary, "rows": rows}
 
 
@@ -186,6 +242,7 @@ def run_suite(
     allow_code_execution: bool = False,
     timeout: int = 600,
     verbose: bool = False,
+    token_scale: float = 1.0,
 ) -> Path:
     """Run the named evals and write CSV + JSON. Returns the CSV path.
 
@@ -197,6 +254,10 @@ def run_suite(
         os.environ["HUMANEVAL_ALLOW_EXEC"] = "1"
 
     client = EvalClient(api_base=api_base, model=model, api_key=api_key, timeout=timeout)
+    problem = client.probe(wait_s=300)
+    if problem:
+        print(f"  SKIP all evals: {problem}")
+        return output_dir / "quality_unavailable.csv"
     run_id = str(uuid.uuid4())[:8]
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = {
@@ -218,7 +279,7 @@ def run_suite(
     all_rows: List[Dict[str, Any]] = []
     summaries: List[Dict[str, Any]] = []
     for spec in specs:
-        result = run_eval(spec, client, base, dict(build_kwargs), False, verbose)
+        result = run_eval(spec, client, base, dict(build_kwargs), False, verbose, token_scale)
         if "rows" in result:
             all_rows.extend(result["rows"])
             summaries.append(result["summary"])
@@ -273,6 +334,11 @@ def main() -> None:
                         help="Permit HumanEval to execute model-written code (see its docstring)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "results" / "quality")
     parser.add_argument("--timeout", type=int, default=600, help="Per-request timeout (s)")
+    parser.add_argument("--wait-ready", type=int, default=300,
+                        help="Seconds to wait for the server to finish loading before giving up")
+    parser.add_argument("--token-scale", type=float, default=1.0,
+                        help="Multiply every eval's max_tokens. Reasoning models need "
+                             "3-4x: they spend the budget thinking before answering.")
     parser.add_argument("--verbose", action="store_true", help="Print every case")
     parser.add_argument("--dry-run", action="store_true", help="Show the plan, contact nothing")
     args = parser.parse_args()
@@ -292,11 +358,12 @@ def main() -> None:
     client = EvalClient(api_base=args.url, model=args.model, api_key=args.api_key,
                         timeout=args.timeout)
     if not args.dry_run:
-        problem = client.probe()
+        problem = client.probe(wait_s=args.wait_ready)
         if problem:
             raise SystemExit(
                 f"{problem}\n"
-                f"Start a server first, e.g.:  bash scripts/serve_local.sh {args.model} --backend llamacpp"
+                f"Start a server first, e.g.:  bash scripts/serve_local.sh {args.model} --backend llamacpp\n"
+                f"If it is still loading, raise --wait-ready (currently {args.wait_ready}s)."
             )
 
     print(f"Quality evals · model={_model_slug(args.model)}")
@@ -313,7 +380,7 @@ def main() -> None:
         if args.limit:
             build_kwargs["limit"] = args.limit
         for spec in specs:
-            run_eval(spec, client, base, dict(build_kwargs), True, args.verbose)
+            run_eval(spec, client, base, dict(build_kwargs), True, args.verbose, args.token_scale)
         print("\nDry run complete — nothing was sent.")
         return
 
@@ -333,6 +400,7 @@ def main() -> None:
         allow_code_execution=args.allow_code_execution,
         timeout=args.timeout,
         verbose=args.verbose,
+        token_scale=args.token_scale,
     )
     print(f"\nCSV  → {csv_path}")
     print(f"JSON → {csv_path.with_suffix('.json')}")

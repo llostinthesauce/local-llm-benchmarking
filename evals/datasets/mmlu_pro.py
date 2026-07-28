@@ -83,7 +83,7 @@ def build_cases(limit: int = 150, seed: int = 20260728, allow_fetch: bool = Fals
             Case(
                 case_id=f"mmlu_pro_{row.get('question_id', index)}",
                 prompt=f"{INSTRUCTION}\n\nQuestion: {row['question']}\n\n{rendered}\n\nAnswer:",
-                max_tokens=16,
+                max_tokens=512,
                 temperature=0.0,
                 meta={
                     "expected": str(row["answer"]).strip().upper()[:1],

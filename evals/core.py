@@ -58,10 +58,31 @@ class Response:
     latency_s: float = 0.0
     ttft_s: float = 0.0
     error: str = ""
+    finish_reason: str = ""
+    reasoning_chars: int = 0
 
     @property
     def ok(self) -> bool:
         return not self.error
+
+    @property
+    def truncated_before_answer(self) -> bool:
+        """True when the model hit max_tokens without emitting any answer.
+
+        Reasoning models spend their budget in `reasoning_content` first. Ask a
+        thinking model for a one-letter answer with max_tokens=16 and it will
+        return empty `content` with finish_reason="length" — it was working
+        correctly and simply never got to speak.
+
+        Scoring that as a wrong answer would report 0% for a healthy model, so
+        the runner counts it as a harness error instead and the summary surfaces
+        it. The fix is a larger token budget, not a different model.
+        """
+        return (
+            self.ok
+            and not self.text.strip()
+            and self.finish_reason == "length"
+        )
 
 
 @dataclass
@@ -152,19 +173,42 @@ class EvalClient:
         choices = data.get("choices") or [{}]
         message = choices[0].get("message") or {}
         text = message.get("content") or ""
+        # Reasoning models put their scratchpad here. It is never scored, but its
+        # size explains a truncated answer, so it is recorded.
+        reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
         usage = data.get("usage") or {}
         return Response(
             text=text,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             latency_s=elapsed,
+            finish_reason=str(choices[0].get("finish_reason") or ""),
+            reasoning_chars=len(reasoning),
         )
 
-    def probe(self) -> Optional[str]:
-        """Return an error string if the server is not usable, else None."""
-        try:
-            request = urllib.request.Request(f"{self.api_base}/models", headers=self._headers())
-            with urllib.request.urlopen(request, timeout=5):
+    def probe(self, wait_s: int = 0) -> Optional[str]:
+        """Return an error string if the server cannot answer, else None.
+
+        Deliberately sends a real one-token completion rather than hitting
+        /v1/models. llama-server answers /v1/models with 200 *while the model is
+        still loading* and only then returns 503 "Loading model" from
+        /v1/chat/completions — so /v1/models reports ready before it is, and a
+        benchmark that trusts it fires its first prompt into a server that has
+        not finished allocating its KV cache. A completion is the only probe
+        that means the same thing on llama.cpp, mlx_lm and mlx_vlm alike.
+
+        With wait_s > 0, keeps retrying transient loading errors until the
+        deadline instead of failing on the first 503.
+        """
+        deadline = time.monotonic() + max(0, wait_s)
+        probe_case = Case(case_id="__probe__", prompt="Reply with: OK", max_tokens=4)
+        last = ""
+        while True:
+            response = self.complete(probe_case)
+            if response.ok or response.truncated_before_answer:
                 return None
-        except Exception as exc:  # noqa: BLE001 - any failure means "not usable"
-            return f"cannot reach {self.api_base}/models ({exc})"
+            last = response.error
+            transient = "503" in last or "502" in last or "unreachable" in last
+            if not transient or time.monotonic() >= deadline:
+                return f"{self.api_base} is not serving completions ({last[:160]})"
+            time.sleep(2)

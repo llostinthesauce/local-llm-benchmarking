@@ -168,7 +168,7 @@ def build_cases(
                 Case(
                     case_id=f"niah_ctx{context_len}_d{int(depth * 100):02d}_n{len(chosen)}",
                     prompt=prompt,
-                    max_tokens=96,
+                    max_tokens=512,
                     temperature=0.0,
                     meta={
                         "expected": [str(code) for _, _, code in chosen],
