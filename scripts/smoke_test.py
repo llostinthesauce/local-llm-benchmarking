@@ -418,9 +418,9 @@ LEAK_SUBSTRINGS = [
 # These are inherently personal — hostnames, usernames, internal project
 # codenames — so committing them would mean the public repo advertises exactly
 # the private names it exists to keep out. Put yours in `.leakpatterns`, one per
-# line (see .leakpatterns.example). Matching is on word boundaries: a bare
-# substring search flags "formatting" for containing a hostname like "matti",
-# and false positives are what train people to ignore the check.
+# line (see .leakpatterns.example). Matching is on word boundaries, because a
+# bare substring search flags ordinary words that happen to contain a short
+# hostname, and false positives are what train people to ignore the check.
 LEAK_WORDS_FILE = ROOT / ".leakpatterns"
 
 

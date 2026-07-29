@@ -123,7 +123,8 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
                   port: int = DEFAULT_PORT, decode_concurrency: int = 1,
                   quant: str = "?", cooldown: int = DEFAULT_COOLDOWN,
                    mem_guard: float = 80.0, dry_run: bool = False,
-                  server: str = "mlx_lm", top_k: int = 20) -> Path:
+                  server: str = "mlx_lm", top_k: int = 20,
+                  existing_api_base: str = "") -> Path:
     model_repo = os.path.expanduser(model_repo)
     model_name = model_repo.split("/")[-1]
     full_model_id = model_repo  # mlx server expects full repo path
@@ -133,10 +134,15 @@ def run_benchmark(model_repo: str, passes: list[dict], output_dir: Path,
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_csv = output_dir / f"{file_prefix}_{model_name}_{ts}.csv"
     output_dir.mkdir(parents=True, exist_ok=True)
-    api_base = f"http://127.0.0.1:{port}/v1"
+    api_base = existing_api_base or f"http://127.0.0.1:{port}/v1"
 
+    # Only spawn a server when the caller does not already have one. Passing
+    # `existing_api_base` makes this match bench_llamacpp_api, which has always
+    # measured whatever is already serving. Without it, a caller holding an MLX
+    # server open (to run quality evals against it) collides on the port, and
+    # the collision manifests as a hang rather than an error.
     server_proc = None
-    if not dry_run:
+    if not dry_run and not existing_api_base:
         server_proc = _start_server(model_repo, port, draft_model, decode_concurrency, server)
         if not server_proc:
             sys.exit(1)
@@ -274,13 +280,16 @@ def main() -> None:
     ap.add_argument("--server", choices=["mlx_lm", "mlx_vlm"], default="mlx_lm",
                     help="Server backend: mlx_lm (text) or mlx_vlm (vision/omni)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--api-base", type=str, default="",
+                    help="Measure an already-running MLX server instead of spawning one")
 
     args = ap.parse_args()
     selected_passes = [p for p in PASSES if p["id"].split("_")[2] in args.passes]
     run_benchmark(args.model, selected_passes, args.output_dir,
                   args.draft_model, args.ctx_cap, args.temperature, args.top_p,
                   args.port, args.decode_concurrency, args.quant, args.cooldown,
-                  args.mem_guard, args.dry_run, args.server, top_k=args.top_k)
+                  args.mem_guard, args.dry_run, args.server, top_k=args.top_k,
+                  existing_api_base=args.api_base)
 
 
 if __name__ == "__main__":

@@ -49,13 +49,30 @@ of the generation and hands back nothing. Compounding it, the metadata sets
 `bos_token_id = 2` and `eos_token_id = 2` — **the same id for both** — with
 `add_bos_token = true`.
 
-**Practical status:** benchmarkable through `/completions` only, which this
-harness does not use (every eval speaks the chat API, deliberately, because that
-is how the model gets served in practice). Re-test when either llama.cpp gains
-a `laguna` chat-format handler or Poolside ships a corrected template. The
-community MLX build (`AtomicChat/Laguna-XS-2.1-MLX-5bit`, ~23 GB) uses a
-different template path and has not been tested here — that is the next thing to
-try.
+**The MLX build does not work either.** `AtomicChat/Laguna-XS-2.1-MLX-5bit`
+(21 GB) was downloaded and tested on mlx-lm 0.31.3:
+
+| Probe | Result |
+|---|---|
+| `mlx_lm.server` starts, `GET /v1/models` | 200 — but the port binds before any model is loaded |
+| `POST /v1/chat/completions` | never returns; timed out at 480s |
+| Server process memory after 10 min | 0.2% of 64 GB, 2.5s CPU — **the weights were never loaded** |
+| `config.json` `model_type` | `laguna` (`LagunaForCausalLM`) |
+| `import mlx_lm.models.laguna` | **ModuleNotFoundError** — mlx-lm has no handler for this architecture |
+
+**Practical status: Laguna XS 2.1 is not runnable by this harness on either
+backend today.** llama.cpp loads it but the chat endpoint returns empty content;
+mlx-lm has no `laguna` module at all, so the server accepts connections and then
+hangs forever. Raw `llama.cpp /completions` is the only path that produces text.
+
+Re-test when llama.cpp gains a `laguna` chat-format handler, Poolside ships a
+corrected template, or mlx-lm adds `mlx_lm/models/laguna.py`.
+
+> A useful side effect: `mlx_lm.server` answers `/v1/models` with 200 *before
+> loading any weights*, exactly like llama-server does while loading. This is
+> why readiness here is a real one-token completion — that probe correctly
+> refused to call this server ready, where a `/v1/models` check would have
+> declared it up and then hung on the first prompt.
 
 ### Cohere North Mini Code 1.0 — 30B-A3B MoE
 
