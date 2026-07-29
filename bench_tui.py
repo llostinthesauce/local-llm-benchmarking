@@ -173,7 +173,7 @@ def _start_llama_server(model_path: str, expected_model: str) -> subprocess.Pope
     return None
 
 
-def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 600) -> bool:
+def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 1800) -> bool:
     """Block until `port` can actually complete a request, or the child dies.
 
     Deliberately not /v1/models. llama-server answers that with 200 while the
@@ -183,6 +183,11 @@ def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: int = 600) -> b
     allocating its KV cache, and at a 262K context that wedges for minutes.
     A one-token completion is the only probe that means the same thing on
     llama.cpp, mlx_lm and mlx_vlm alike.
+
+    The default is generous because cold-loading large MLX weights is genuinely
+    slow: a 6-bit 35B MoE (~28 GB of safetensors) exceeded a 600s budget on an
+    M5 Pro and was wrongly reported as "never came up". Waiting costs nothing
+    when the server is healthy — the probe returns the moment it can answer.
     """
     deadline = time.time() + timeout_s
     payload = {

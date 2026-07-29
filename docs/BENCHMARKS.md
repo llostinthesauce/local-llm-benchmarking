@@ -153,6 +153,38 @@ Requires `--allow-code-execution` on top of `--fetch`.
 
 ---
 
+## Serving quirks that will bite you
+
+Measured on an M5 Pro, llama.cpp b10090 / mlx-lm 0.31.3, and all three cost real
+benchmark runs before being understood:
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| Server "up" but first prompt hangs forever | `/v1/models` returns 200 *while the model is still loading*; `/v1/chat/completions` returns 503 | Probe readiness with a real one-token completion — what this harness now does |
+| Server stops answering mid-run, 0% CPU, never recovers | llama-server at `-c 262144` wedges permanently on a ~131K-token prompt | Cap `--ctx-cap` (16K was reliable here). The runner aborts after 3 consecutive failures rather than grinding through timeouts |
+| "server never came up" on a big MLX model | Cold-loading ~28 GB of 6-bit safetensors took longer than a 600s budget | Readiness now waits up to 1800s; waiting is free when the server is healthy |
+
+The general rule for telling "slow" from "wedged": check whether the server is
+actually burning CPU. `ps aux | grep llama-server` and watch the TIME column —
+an idle server with a waiting client is wedged, not thinking.
+
+### Known defect: bench_mlx_api always spawns its own server
+
+`bench_llamacpp_api.run_benchmark()` takes an `api_base` and measures whatever is
+already serving. `bench_mlx_api.run_benchmark()` does not — it unconditionally
+calls `_start_server()` on port 8085.
+
+That asymmetry means a caller who has already started an MLX server (to run
+quality evals against it, say) cannot then ask for speed numbers on the same
+process: the second launch collides on the port, and the failure is a hang
+rather than a clean error. It is why `run_exhaustive_benchmarks.sh --evals`
+needs a separate MLX quality pass instead of reusing the speed pass's server.
+
+**Workaround:** run MLX speed and MLX quality as separate phases, each owning its
+own server — which is what the orchestrator does. **Fix:** give
+`bench_mlx_api.run_benchmark()` the same `api_base` / "don't serve" option
+`bench_llamacpp_api` has. Not yet done.
+
 ## Running them
 
 ```bash
